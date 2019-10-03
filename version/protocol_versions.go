@@ -17,6 +17,9 @@ const LOCALNET = "localnet"
 const TEST = "go-filecoin-test"
 
 // PERSON is the network name for person network
+const ALPHASTAGING = "alpha-staging"
+
+// PERSON is the network name for person network
 const PERSON = "person"
 
 // Protocol0 is the first protocol version
@@ -32,5 +35,6 @@ func ConfigureProtocolVersions(network string) (*ProtocolVersionTable, error) {
 		Add(LOCALNET, Protocol0, types.NewBlockHeight(0)).
 		Add(TEST, Protocol0, types.NewBlockHeight(0)).
 		Add(PERSON, Protocol0, types.NewBlockHeight(0)).
+		Add(ALPHASTAGING, Protocol0, types.NewBlockHeight(0)).
 		Build()
 }
