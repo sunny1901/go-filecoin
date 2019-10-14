@@ -376,13 +376,20 @@ func (b *Builder) buildNetwork(ctx context.Context, config *config.BootstrapConf
 }
 
 func (b *Builder) buildMessaging(ctx context.Context, network *NetworkSubmodule, chain *ChainSubmodule, wallet *WalletSubmodule) (MessagingSubmodule, error) {
-	msgPool := message.NewPool(b.Repo.Config().Mpool, consensus.NewIngestionValidator(chain.State, b.Repo.Config().Mpool))
+	poolValidator := consensus.NewIngestionValidator(chain.State, b.Repo.Config().Mpool)
+	msgPool := message.NewPool(b.Repo.Config().Mpool, poolValidator)
 	inbox := message.NewInbox(msgPool, message.InboxMaxAgeTipsets, chain.ChainReader, chain.MessageStore)
 
 	msgQueue := message.NewQueue()
 	outboxPolicy := message.NewMessageQueuePolicy(chain.MessageStore, message.OutboxMaxAgeRounds)
 	msgPublisher := message.NewDefaultPublisher(pubsub.NewPublisher(network.fsub), net.MessageTopic(network.NetworkName), msgPool)
 	outbox := message.NewOutbox(wallet.Wallet, consensus.NewOutboundMessageValidator(), msgQueue, msgPublisher, outboxPolicy, chain.ChainReader, chain.State, b.Journal.Topic("outbox"))
+
+	// register message validation on pubsub
+	mtv := net.NewMessageTopicValidator(poolValidator)
+	if err := network.fsub.RegisterTopicValidator(mtv.Topic(network.NetworkName), mtv.Validator(), mtv.Opts()...); err != nil {
+		return MessagingSubmodule{}, errors.Wrap(err, "failed to register message validator")
+	}
 
 	return MessagingSubmodule{
 		Inbox:   inbox,
