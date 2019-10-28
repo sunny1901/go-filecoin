@@ -185,30 +185,6 @@ func TestAcceptHeavierFork(t *testing.T) {
 	verifyHead(t, store, fork3)
 }
 
-func TestFarFutureTipsets(t *testing.T) {
-	tf.UnitTest(t)
-	ctx := context.Background()
-
-	t.Run("accepts when syncing", func(t *testing.T) {
-		builder, store, _ := setup(ctx, t)
-		genesis := builder.RequireTipSet(store.GetHead())
-		farHead := builder.AppendManyOn(chain.UntrustedChainHeightLimit+1, genesis)
-
-		syncer := chain.NewSyncer(&chain.FakeStateEvaluator{}, &chain.FakeChainSelector{}, store, builder, builder, chain.NewStatusReporter(), th.NewFakeClock(time.Unix(1234567890, 0)))
-		assert.NoError(t, syncer.HandleNewTipSet(ctx, block.NewChainInfo(peer.ID(""), farHead.Key(), heightFromTip(t, farHead)), true))
-	})
-
-	t.Run("rejects when caught up", func(t *testing.T) {
-		builder, store, _ := setup(ctx, t)
-		genesis := builder.RequireTipSet(store.GetHead())
-		farHead := builder.AppendManyOn(chain.UntrustedChainHeightLimit+1, genesis)
-
-		syncer := chain.NewSyncer(&chain.FakeStateEvaluator{}, &chain.FakeChainSelector{}, store, builder, builder, chain.NewStatusReporter(), th.NewFakeClock(time.Unix(1234567890, 0)))
-		err := syncer.HandleNewTipSet(ctx, block.NewChainInfo(peer.ID(""), farHead.Key(), heightFromTip(t, farHead)), false)
-		assert.Error(t, err)
-	})
-}
-
 func TestNoUncessesaryFetch(t *testing.T) {
 	tf.UnitTest(t)
 	ctx := context.Background()

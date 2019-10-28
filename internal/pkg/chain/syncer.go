@@ -2,7 +2,6 @@ package chain
 
 import (
 	"context"
-	"sync"
 
 	"github.com/filecoin-project/go-filecoin/internal/pkg/block"
 	"github.com/ipfs/go-cid"
@@ -83,15 +82,6 @@ type syncStateEvaluator interface {
 // tipset in the incoming chain, and assumptions regarding the existence of
 // grandparent state in the store.
 type Syncer struct {
-	// This mutex ensures at most one call to HandleNewTipSet executes at
-	// any time.  This is important because at least two sections of the
-	// code otherwise have races:
-	// 1. syncOne assumes that chainStore.Head() does not change when
-	// comparing tipset weights and updating the store
-	// 2. HandleNewTipSet assumes that calls to widen and then syncOne
-	// are not run concurrently with other calls to widen to ensure
-	// that the syncer always finds the heaviest existing tipset.
-	mu sync.Mutex
 	// fetcher is the networked block fetching service for fetching blocks
 	// and messages.
 	fetcher net.Fetcher
@@ -386,33 +376,13 @@ func (syncer *Syncer) HandleNewTipSet(ctx context.Context, ci *block.ChainInfo, 
 	span.AddAttributes(trace.StringAttribute("tipset", ci.Head.String()))
 	defer tracing.AddErrorEndSpan(ctx, span, &err)
 
-	// This lock could last a long time as we fetch all the blocks needed to sync the chain.
-	// This is justified because the app is pretty useless until it is synced.
-	// It's better for multiple calls to wait here than to try to fetch the chain independently.
-	syncer.mu.Lock()
-	defer syncer.mu.Unlock()
-
 	// If the store already has this tipset then the syncer is finished.
 	if syncer.chainStore.HasTipSetAndState(ctx, ci.Head) {
 		return nil
 	}
 
-	curHead, err := syncer.chainStore.GetTipSet(syncer.chainStore.GetHead())
-	if err != nil {
-		return err
-	}
-	curHeight, err := curHead.Height()
-	if err != nil {
-		return err
-	}
-
 	syncer.reporter.UpdateStatus(syncingStarted(syncer.clock.Now().Unix()), syncHead(ci.Head), syncHeight(ci.Height), syncTrusted(trusted), syncComplete(false))
 	defer syncer.reporter.UpdateStatus(syncComplete(true))
-
-	// If we do not trust the peer head check finality
-	if !trusted && ExceedsUntrustedChainLength(curHeight, ci.Height) {
-		return ErrNewChainTooLong
-	}
 
 	syncer.reporter.UpdateStatus(syncFetchComplete(false))
 	chain, err := syncer.fetcher.FetchTipSets(ctx, ci.Head, ci.Peer, func(t block.TipSet) (bool, error) {
@@ -490,11 +460,4 @@ func (syncer *Syncer) HandleNewTipSet(ctx context.Context, ci *block.ChainInfo, 
 // Status returns the current chain status.
 func (syncer *Syncer) Status() Status {
 	return syncer.reporter.Status()
-}
-
-// ExceedsUntrustedChainLength returns true if the delta between curHeight and newHeight
-// exceeds the maximum number of blocks to accept if syncing without trust, false otherwise.
-func ExceedsUntrustedChainLength(curHeight, newHeight uint64) bool {
-	maxChainLength := curHeight + uint64(UntrustedChainHeightLimit)
-	return newHeight > maxChainLength
 }
