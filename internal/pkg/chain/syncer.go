@@ -2,6 +2,7 @@ package chain
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/filecoin-project/go-filecoin/internal/pkg/block"
 	"github.com/ipfs/go-cid"
@@ -196,12 +197,30 @@ func (syncer *Syncer) syncOne(ctx context.Context, grandParent, parent, next blo
 	}
 	logSyncer.Debugf("Successfully updated store with %s", next.String())
 
+	return nil
+}
+
+// TODO #3537 this should be stored the first time it is computed and retrieved
+// from disk just like aggregate state roots.
+func (syncer *Syncer) calculateParentWeight(ctx context.Context, parent, grandParent block.TipSet) (uint64, error) {
+	if grandParent.Equals(block.UndefTipSet) {
+		return syncer.chainSelector.NewWeight(ctx, parent, cid.Undef)
+	}
+	gpStRoot, err := syncer.chainStore.GetTipSetStateRoot(grandParent.Key())
+	if err != nil {
+		return 0, err
+	}
+	return syncer.chainSelector.NewWeight(ctx, parent, gpStRoot)
+}
+
+func (syncer *Syncer) maybeSetHead(ctx context.Context, parent, next block.TipSet) error {
 	// TipSet is validated and added to store, now check if it is the heaviest.
 	nextParentStateID, err := syncer.chainStore.GetTipSetStateRoot(parent.Key())
 	if err != nil {
 		return err
 	}
-
+	
+	priorHeadKey := syncer.chainStore.GetHead()
 	headTipSet, err := syncer.chainStore.GetTipSet(priorHeadKey)
 	if err != nil {
 		return err
@@ -232,21 +251,7 @@ func (syncer *Syncer) syncOne(ctx context.Context, grandParent, parent, next blo
 		// Gather the entire new chain for reorg comparison and logging.
 		syncer.logReorg(ctx, headTipSet, next)
 	}
-
 	return nil
-}
-
-// TODO #3537 this should be stored the first time it is computed and retrieved
-// from disk just like aggregate state roots.
-func (syncer *Syncer) calculateParentWeight(ctx context.Context, parent, grandParent block.TipSet) (uint64, error) {
-	if grandParent.Equals(block.UndefTipSet) {
-		return syncer.chainSelector.NewWeight(ctx, parent, cid.Undef)
-	}
-	gpStRoot, err := syncer.chainStore.GetTipSetStateRoot(grandParent.Key())
-	if err != nil {
-		return 0, err
-	}
-	return syncer.chainSelector.NewWeight(ctx, parent, gpStRoot)
 }
 
 // ancestorsFromStore returns the parent and grandparent tipsets of `ts`
@@ -428,6 +433,15 @@ func (syncer *Syncer) HandleNewTipSet(ctx context.Context, ci *block.ChainInfo, 
 				if err != nil {
 					return err
 				}
+				ts = wts
+				// widened tipset might be heavier than chain
+				// head so potentially set here.
+				err = syncer.maybeSetHead(ctx, parent, wts)
+				if err != nil {
+					fmt.Printf("error widen set %s\n", err)
+					
+					return err
+				}
 			}
 		}
 		// If the chain has length greater than 1, then we need to sync each tipset
@@ -454,7 +468,14 @@ func (syncer *Syncer) HandleNewTipSet(ctx context.Context, ci *block.ChainInfo, 
 		grandParent = parent
 		parent = ts
 	}
-	return nil
+	chainHead := parent
+	chainHeadParent := grandParent
+	// The whole chain is valid. Reset head to it if heavier.
+	err = syncer.maybeSetHead(ctx, chainHeadParent, chainHead)
+	if err != nil {
+		fmt.Printf("error last set %s\n", err)
+	}
+	return err
 }
 
 // Status returns the current chain status.

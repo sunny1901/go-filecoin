@@ -133,7 +133,6 @@ func TestMinerCreate(t *testing.T) {
 			defer d.ShutdownSuccess()
 
 			d1.ConnectSuccess(d)
-
 			args := []string{"miner", "create", "--from", fromAddress.String(), "--gas-price", "1", "--gas-limit", "300"}
 
 			if pid.Pretty() != peer.ID("").Pretty() {
@@ -147,7 +146,9 @@ func TestMinerCreate(t *testing.T) {
 
 			wg.Add(1)
 			go func() {
+		
 				miner := d.RunSuccess(args...)
+		
 				addr, err = address.NewFromString(strings.Trim(miner.ReadStdout(), "\n"))
 				assert.NoError(t, err)
 				assert.NotEqual(t, addr, address.Undef)
@@ -155,7 +156,9 @@ func TestMinerCreate(t *testing.T) {
 			}()
 
 			// ensure mining runs after the command in our goroutine
+
 			d1.MineAndPropagate(time.Second, d)
+		
 			wg.Wait()
 
 			// expect address to have been written in config
@@ -229,20 +232,25 @@ func TestMinerSetPrice(t *testing.T) {
 func TestMinerCreateSuccess(t *testing.T) {
 	tf.IntegrationTest(t)
 
+	fmt.Printf("setting up fast\n")												
 	ctx, env := fastesting.NewTestEnvironment(context.Background(), t, fast.FilecoinOpts{})
-	defer func() {
-		require.NoError(t, env.Teardown(ctx))
-	}()
+//	defer func() {
+//		require.NoError(t, env.Teardown(ctx))
+//	}()
 	require.NoError(t, env.GenesisMiner.MiningStart(ctx))
 	defer func() {
 		require.NoError(t, env.GenesisMiner.MiningStop(ctx))
 	}()
+	fmt.Printf("Set up gen miner dir: %s\n", env.GenesisMiner.Dir())
+	time.Sleep(20 * time.Second)	
 	env.RunAsyncMiner()
-
+	fmt.Printf("Run async miner: %s\n", env.GenesisMiner.Dir())				
 	minerNode := env.RequireNewNodeWithFunds(1000)
+	fmt.Printf("Make miner node: %s\n", env.GenesisMiner.Dir())					
 
 	minerAddress := requireMinerCreate(ctx, t, env, minerNode)
 	assert.NotEqual(t, address.Undef, minerAddress)
+	time.Sleep(500 * time.Second)
 }
 
 func requireMinerCreate(ctx context.Context, t *testing.T, env *fastesting.TestEnvironment, minerNode *fast.Filecoin) address.Address {

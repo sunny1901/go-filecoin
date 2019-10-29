@@ -55,7 +55,7 @@ func IntegrationTest(t *testing.T) {
 	if !*integrationTest {
 		t.SkipNow()
 	}
-	t.Parallel()
+//	t.Parallel()
 }
 
 // UnitTest will run the test its called from iff the `-unit` or `-short` flag
