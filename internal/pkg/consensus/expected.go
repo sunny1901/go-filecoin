@@ -65,9 +65,6 @@ const AncestorRoundsNeeded = miner.LargestSectorSizeProvingPeriodBlocks + miner.
 
 // A Processor processes all the messages in a block or tip set.
 type Processor interface {
-	// ProcessBlock processes all messages in a block.
-	ProcessBlock(context.Context, state.Tree, vm.StorageMap, *block.Block, []*types.SignedMessage, []block.TipSet) ([]*ApplicationResult, error)
-
 	// ProcessTipSet processes all messages in a tip set.
 	ProcessTipSet(context.Context, state.Tree, vm.StorageMap, block.TipSet, [][]*types.SignedMessage, []block.TipSet) (*ProcessTipSetResponse, error)
 }
