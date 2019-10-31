@@ -217,7 +217,7 @@ func (syncer *Syncer) syncOne(ctx context.Context, grandParent, parent, next blo
 	if err != nil {
 		return err
 	}
-	ancestorHeight := types.NewBlockHeight(h).Sub(types.NewBlockHeight(consensus.AncestorRoundsNeeded))
+	ancestorHeight := types.NewBlockHeight(h).Sub(types.NewBlockHeight(uint64(consensus.AncestorRoundsNeeded)))
 	ancestors, err := chain.GetRecentAncestors(ctx, parent, syncer.chainStore, ancestorHeight)
 	if err != nil {
 		return err

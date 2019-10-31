@@ -18,6 +18,7 @@ import (
 	"github.com/filecoin-project/go-filecoin/internal/pkg/block"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/crypto"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/metrics/tracing"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/sampling"	
 	"github.com/filecoin-project/go-filecoin/internal/pkg/types"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/miner"
@@ -50,6 +51,8 @@ var (
 // We also use this to enforce a soft block validation.
 const DefaultBlockTime = 30 * time.Second
 
+const ElectionLookback = 5
+
 // AncestorRoundsNeeded is the number of rounds of the ancestor chain needed
 // to process all state transitions.
 //
@@ -57,7 +60,7 @@ const DefaultBlockTime = 30 * time.Second
 // largest sector size - this constant will need to be reconsidered.
 // https://github.com/filecoin-project/specs/pull/318
 // NOTE(anorth): This height is excessive, but safe, with the Rational PoSt construction.
-const AncestorRoundsNeeded = miner.LargestSectorSizeProvingPeriodBlocks + miner.PoStChallengeWindowBlocks
+var AncestorRoundsNeeded = max(miner.LargestSectorSizeProvingPeriodBlocks + miner.PoStChallengeWindowBlocks, ElectionLookback)
 
 // A Processor processes all the messages in a block or tip set.
 type Processor interface {
@@ -149,7 +152,7 @@ func (c *Expected) RunStateTransition(ctx context.Context, ts block.TipSet, blsM
 		return cid.Undef, []*types.MessageReceipt{}, err
 	}
 
-	if err := c.validateMining(ctx, priorState, ts, ancestors[0], blsMessages, secpMessages, parentWeight); err != nil {
+	if err := c.validateMining(ctx, priorState, ts, ancestors[0], ancestors, blsMessages, secpMessages, parentWeight); err != nil {
 		return cid.Undef, []*types.MessageReceipt{}, err
 	}
 
@@ -181,7 +184,11 @@ func (c *Expected) RunStateTransition(ctx context.Context, ts block.TipSet, blsM
 //      * has a losing election proof
 //    Returns nil if all the above checks pass.
 // See https://github.com/filecoin-project/specs/blob/master/mining.md#chain-validation
-func (c *Expected) validateMining(ctx context.Context, st state.Tree, ts block.TipSet, parentTs block.TipSet, blsMsgs [][]*types.UnsignedMessage, secpMsgs [][]*types.SignedMessage, parentWeight uint64) error {
+func (c *Expected) validateMining(ctx context.Context, st state.Tree, ts block.TipSet, parentTs block.TipSet, ancestors []block.TipSet, blsMsgs [][]*types.UnsignedMessage, secpMsgs [][]*types.SignedMessage, parentWeight uint64) error {
+	electionTicket, err := sampling.SampleNthTicket(ElectionLookback - 1, ancestors)
+	if err != nil {
+		return errors.Wrap(err, "failed to sample election ticket from ancestorst")
+	}
 	prevTicket, err := parentTs.MinTicket()
 	if err != nil {
 		return errors.Wrap(err, "failed to read parent min ticket")
@@ -222,7 +229,7 @@ func (c *Expected) validateMining(ctx context.Context, st state.Tree, ts block.T
 
 		// Validate ElectionProof
 		nullBlkCount := uint64(blk.Height) - prevHeight - 1
-		result, err := c.IsElectionWinner(ctx, pwrTableView, prevTicket, nullBlkCount, blk.ElectionProof, workerAddr, blk.Miner)
+		result, err := c.IsElectionWinner(ctx, pwrTableView, electionTicket, nullBlkCount, blk.ElectionProof, workerAddr, blk.Miner)
 		if err != nil {
 			return errors.Wrap(err, "failed checking election proof")
 		}
@@ -342,4 +349,11 @@ func unwrap(smsgs [][]*types.SignedMessage) [][]*types.UnsignedMessage {
 		unsigned[i] = types.UnwrapSigned(inner)
 	}
 	return unsigned
+}
+
+func max(a, b int) int {
+	if a >= b {
+		return a
+	}
+	return b
 }
