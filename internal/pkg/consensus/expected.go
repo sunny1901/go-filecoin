@@ -18,7 +18,7 @@ import (
 	"github.com/filecoin-project/go-filecoin/internal/pkg/block"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/crypto"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/metrics/tracing"
-	"github.com/filecoin-project/go-filecoin/internal/pkg/sampling"	
+	"github.com/filecoin-project/go-filecoin/internal/pkg/sampling"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/types"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/miner"
@@ -51,6 +51,8 @@ var (
 // We also use this to enforce a soft block validation.
 const DefaultBlockTime = 30 * time.Second
 
+// ElectionLookback is the number of tipsets past the head (inclusive)) that
+// must be traversed to sample the election ticket.
 const ElectionLookback = 5
 
 // AncestorRoundsNeeded is the number of rounds of the ancestor chain needed
@@ -60,7 +62,7 @@ const ElectionLookback = 5
 // largest sector size - this constant will need to be reconsidered.
 // https://github.com/filecoin-project/specs/pull/318
 // NOTE(anorth): This height is excessive, but safe, with the Rational PoSt construction.
-var AncestorRoundsNeeded = max(miner.LargestSectorSizeProvingPeriodBlocks + miner.PoStChallengeWindowBlocks, ElectionLookback)
+var AncestorRoundsNeeded = max(miner.LargestSectorSizeProvingPeriodBlocks+miner.PoStChallengeWindowBlocks, ElectionLookback)
 
 // A Processor processes all the messages in a block or tip set.
 type Processor interface {
@@ -185,9 +187,9 @@ func (c *Expected) RunStateTransition(ctx context.Context, ts block.TipSet, blsM
 //    Returns nil if all the above checks pass.
 // See https://github.com/filecoin-project/specs/blob/master/mining.md#chain-validation
 func (c *Expected) validateMining(ctx context.Context, st state.Tree, ts block.TipSet, parentTs block.TipSet, ancestors []block.TipSet, blsMsgs [][]*types.UnsignedMessage, secpMsgs [][]*types.SignedMessage, parentWeight uint64) error {
-	electionTicket, err := sampling.SampleNthTicket(ElectionLookback - 1, ancestors)
+	electionTicket, err := sampling.SampleNthTicket(ElectionLookback-1, ancestors)
 	if err != nil {
-		return errors.Wrap(err, "failed to sample election ticket from ancestorst")
+		return errors.Wrap(err, "failed to sample election ticket from ancestors")
 	}
 	prevTicket, err := parentTs.MinTicket()
 	if err != nil {

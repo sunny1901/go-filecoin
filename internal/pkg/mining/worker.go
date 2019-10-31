@@ -17,7 +17,7 @@ import (
 	"github.com/filecoin-project/go-filecoin/internal/pkg/chain"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/clock"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/consensus"
-	"github.com/filecoin-project/go-filecoin/internal/pkg/sampling"	
+	"github.com/filecoin-project/go-filecoin/internal/pkg/sampling"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/types"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/address"
@@ -176,7 +176,6 @@ func (w *DefaultWorker) Mine(ctx context.Context, base block.TipSet, nullBlkCoun
 		return
 	}
 
-
 	// lookback consensus.ElectionLookback
 	prevTicket, err := base.MinTicket()
 	if err != nil {
@@ -200,7 +199,7 @@ func (w *DefaultWorker) Mine(ctx context.Context, base block.TipSet, nullBlkCoun
 		w.clock.Sleep(w.api.BlockTime())
 		done <- struct{}{}
 	}()
-	
+
 	select {
 	case <-ctx.Done():
 		log.Infow("Mining run on tipset with null blocks canceled.", "tipset", base, "nullBlocks", nullBlkCount)
@@ -213,20 +212,20 @@ func (w *DefaultWorker) Mine(ctx context.Context, base block.TipSet, nullBlkCoun
 	if err != nil {
 		log.Warnf("Worker.Mine couldn't read base height %s", err)
 		outCh <- Output{Err: err}
-		return		
+		return
 	}
-	ancestors, err := w.getAncestors(ctx, base, types.NewBlockHeight(baseHeight + nullBlkCount + 1))
+	ancestors, err := w.getAncestors(ctx, base, types.NewBlockHeight(baseHeight+nullBlkCount+1))
 	if err != nil {
 		log.Warnf("Worker.Mine couldn't get ancestorst %s", err)
 		outCh <- Output{Err: err}
-		return		
+		return
 	}
-	electionTicket, err := sampling.SampleNthTicket(consensus.ElectionLookback - 1, ancestors)
+	electionTicket, err := sampling.SampleNthTicket(consensus.ElectionLookback-1, ancestors)
 	if err != nil {
 		log.Warnf("Worker.Mine couldn't read parent ticket %s", err)
 		outCh <- Output{Err: err}
 		return
-	}	
+	}
 
 	// Run an election to check if this miner has won the right to mine
 	electionProof, err := w.election.RunElection(electionTicket, workerAddr, w.workerSigner, nullBlkCount)

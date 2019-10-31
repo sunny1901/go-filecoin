@@ -13,7 +13,7 @@ func SampleNthTicket(n int, tipSetsDescending []block.TipSet) (block.Ticket, err
 	if len(tipSetsDescending) == 0 {
 		return block.Ticket{}, errors.New("can't sample empty chain segment")
 	}
-	lastIdx := len(tipSetsDescending) -1	
+	lastIdx := len(tipSetsDescending) - 1
 	if n > lastIdx {
 		// Handle chain startup
 		lowestAvailableHeight, err := tipSetsDescending[lastIdx].Height()
@@ -24,11 +24,10 @@ func SampleNthTicket(n int, tipSetsDescending []block.TipSet) (block.Ticket, err
 		// tipSetsDescending run all the way back to genesis
 		if lowestAvailableHeight == 0 {
 			return tipSetsDescending[lastIdx].MinTicket()
-		} else {
-			return block.Ticket{}, errors.Errorf("can't sample ticket %d from %d tipsets", n, lastIdx+1)
 		}
+		return block.Ticket{}, errors.Errorf("can't sample ticket %d from %d tipsets", n, lastIdx+1)
 	}
-	
+
 	return tipSetsDescending[n].MinTicket()
 }
 

@@ -47,7 +47,7 @@ func Test_Mine(t *testing.T) {
 
 	newCid := types.NewCidForTestGetter()
 	stateRoot := newCid()
-	baseBlock := &block.Block{Height: 2, StateRoot: stateRoot, Ticket: block.Ticket{VRFProof: []byte{0}}}
+	baseBlock := &block.Block{Height: 0, StateRoot: stateRoot, Ticket: block.Ticket{VRFProof: []byte{0}}}
 	tipSet := th.RequireNewTipSet(t, baseBlock)
 
 	st, pool, addrs, bs := sharedSetup(t, mockSignerVal)
@@ -55,7 +55,7 @@ func Test_Mine(t *testing.T) {
 		return st, nil
 	}
 	getAncestors := func(ctx context.Context, ts block.TipSet, newBlockHeight *types.BlockHeight) ([]block.TipSet, error) {
-		return nil, nil
+		return []block.TipSet{tipSet}, nil
 	}
 
 	minerAddr := addrs[3]      // addr4 in sharedSetup
@@ -258,7 +258,7 @@ func TestApplyBLSMessages(t *testing.T) {
 
 	newCid := types.NewCidForTestGetter()
 	stateRoot := newCid()
-	baseBlock := &block.Block{Height: 2, StateRoot: stateRoot, Ticket: block.Ticket{VRFProof: []byte{0}}}
+	baseBlock := &block.Block{Height: 0, StateRoot: stateRoot, Ticket: block.Ticket{VRFProof: []byte{0}}}
 	tipSet := th.RequireNewTipSet(t, baseBlock)
 
 	st, pool, addrs, bs := sharedSetup(t, mockSignerVal)
@@ -266,7 +266,7 @@ func TestApplyBLSMessages(t *testing.T) {
 		return st, nil
 	}
 	getAncestors := func(ctx context.Context, ts block.TipSet, newBlockHeight *types.BlockHeight) ([]block.TipSet, error) {
-		return nil, nil
+		return []block.TipSet{tipSet}, nil
 	}
 
 	msgStore := chain.NewMessageStore(bs)
