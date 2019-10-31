@@ -318,15 +318,9 @@ func verifyBLSMessageAggregate(sig types.Signature, msgs []*types.UnsignedMessag
 
 func combineMessages(blsMessages [][]*types.UnsignedMessage, secpMessages [][]*types.SignedMessage) [][]*types.SignedMessage {
 	messages := make([][]*types.SignedMessage, len(secpMessages))
-	for i := 0; i < len(secpMessages); i++ {
-		messages[i] = []*types.SignedMessage{}
-		for _, msgs := range blsMessages {
-
-			messages[i] = append(messages[i], wrapMessages(msgs)...)
-		}
-		for _, msgs := range secpMessages {
-			messages[i] = append(messages[i], msgs...)
-		}
+	for blockIndex := 0; blockIndex < len(secpMessages); blockIndex++ {
+		messages[blockIndex] = append(messages[blockIndex], wrapMessages(blsMessages[blockIndex])...)
+		messages[blockIndex] = append(messages[blockIndex], secpMessages[blockIndex]...)
 	}
 	return messages
 }
