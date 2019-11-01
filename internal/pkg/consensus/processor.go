@@ -13,7 +13,6 @@ import (
 	"github.com/filecoin-project/go-filecoin/internal/pkg/metrics"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/metrics/tracing"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/types"
-	"github.com/filecoin-project/go-filecoin/internal/pkg/vm"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/account"
@@ -21,6 +20,8 @@ import (
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/address"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/errors"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/state"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/vm2"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/vm2/procneeds"
 )
 
 var (
@@ -119,7 +120,7 @@ func NewConfiguredProcessor(validator MessageValidator, rewarder BlockRewarder, 
 // will in many cases be successfully applied even though an
 // error was thrown causing any state changes to be rolled back.
 // See comments on ApplyMessage for specific intent.
-func (p *DefaultProcessor) ProcessBlock(ctx context.Context, st state.Tree, vms vm.StorageMap, blk *block.Block, blkMessages []*types.UnsignedMessage, ancestors []block.TipSet) (results []*ApplicationResult, err error) {
+func (p *DefaultProcessor) ProcessBlock(ctx context.Context, st state.Tree, vms vm2.StorageMap, blk *block.Block, blkMessages []*types.UnsignedMessage, ancestors []block.TipSet) (results []*ApplicationResult, err error) {
 	ctx, span := trace.StartSpan(ctx, "DefaultProcessor.ProcessBlock")
 	span.AddAttributes(trace.StringAttribute("block", blk.Cid().String()))
 	defer tracing.AddErrorEndSpan(ctx, span, &err)
@@ -157,7 +158,7 @@ func (p *DefaultProcessor) ProcessBlock(ctx context.Context, st state.Tree, vms 
 // coming from calls to ApplyMessage can be traced to different blocks in the
 // TipSet containing conflicting messages and are ignored.  Blocks are applied
 // in the sorted order of their tickets.
-func (p *DefaultProcessor) ProcessTipSet(ctx context.Context, st state.Tree, vms vm.StorageMap, ts block.TipSet, tsMessages [][]*types.UnsignedMessage, ancestors []block.TipSet) (tsResult *ProcessTipSetResponse, err error) {
+func (p *DefaultProcessor) ProcessTipSet(ctx context.Context, st state.Tree, vms vm2.StorageMap, ts block.TipSet, tsMessages [][]*types.UnsignedMessage, ancestors []block.TipSet) (tsResult *ProcessTipSetResponse, err error) {
 	ctx, span := trace.StartSpan(ctx, "DefaultProcessor.ProcessTipSet")
 	span.AddAttributes(trace.StringAttribute("tipset", ts.String()))
 	defer tracing.AddErrorEndSpan(ctx, span, &err)
@@ -295,7 +296,7 @@ func DeduppedUnwrappedMessages(msgs [][]*types.SignedMessage) ([][]*types.Unsign
 //       revert errors.
 //   - everything else: successfully applied (include, keep changes)
 //
-func (p *DefaultProcessor) ApplyMessage(ctx context.Context, st state.Tree, vms vm.StorageMap, msg *types.UnsignedMessage, minerOwnerAddr address.Address, bh *types.BlockHeight, gasTracker *vm.GasTracker, ancestors []block.TipSet) (result *ApplicationResult, err error) {
+func (p *DefaultProcessor) ApplyMessage(ctx context.Context, st state.Tree, vms vm2.StorageMap, msg *types.UnsignedMessage, minerOwnerAddr address.Address, bh *types.BlockHeight, gasTracker *procneeds.GasTracker, ancestors []block.TipSet) (result *ApplicationResult, err error) {
 	msgCid, err := msg.Cid()
 	if err != nil {
 		return nil, errors.FaultErrorWrap(err, "could not get message cid")
@@ -386,7 +387,7 @@ var (
 // CallQueryMethod calls a method on an actor in the given state tree. It does
 // not make any changes to the state/blockchain and is useful for interrogating
 // actor state. Block height bh is optional; some methods will ignore it.
-func (p *DefaultProcessor) CallQueryMethod(ctx context.Context, st state.Tree, vms vm.StorageMap, to address.Address, method types.MethodID, params []byte, from address.Address, optBh *types.BlockHeight) ([][]byte, uint8, error) {
+func (p *DefaultProcessor) CallQueryMethod(ctx context.Context, st state.Tree, vms vm2.StorageMap, to address.Address, method types.MethodID, params []byte, from address.Address, optBh *types.BlockHeight) ([][]byte, uint8, error) {
 	toActor, err := st.GetActor(ctx, to)
 	if err != nil {
 		return nil, 1, errors.ApplyErrorPermanentWrapf(err, "failed to get To actor")
@@ -405,10 +406,10 @@ func (p *DefaultProcessor) CallQueryMethod(ctx context.Context, st state.Tree, v
 	}
 
 	// Set the gas limit to the max because this message send should always succeed; it doesn't cost gas.
-	gasTracker := vm.NewGasTracker()
+	gasTracker := procneeds.NewGasTracker()
 	gasTracker.MsgGasLimit = types.BlockGasLimit
 
-	vmCtxParams := vm.NewContextParams{
+	vmCtxParams := procneeds.NewContextParams{
 		To:          toActor,
 		Message:     msg,
 		State:       cachedSt,
@@ -418,14 +419,14 @@ func (p *DefaultProcessor) CallQueryMethod(ctx context.Context, st state.Tree, v
 		Actors:      p.actors,
 	}
 
-	vmCtx := vm.NewVMContext(vmCtxParams)
-	ret, retCode, err := vm.Send(ctx, vmCtx)
+	vmCtx := procneeds.NewVMContext(vmCtxParams)
+	ret, retCode, err := procneeds.Send(ctx, vmCtx)
 	return ret, retCode, err
 }
 
 // PreviewQueryMethod estimates the amount of gas that will be used by a method
 // call. It accepts all the same arguments as CallQueryMethod.
-func (p *DefaultProcessor) PreviewQueryMethod(ctx context.Context, st state.Tree, vms vm.StorageMap, to address.Address, method types.MethodID, params []byte, from address.Address, optBh *types.BlockHeight) (types.GasUnits, error) {
+func (p *DefaultProcessor) PreviewQueryMethod(ctx context.Context, st state.Tree, vms vm2.StorageMap, to address.Address, method types.MethodID, params []byte, from address.Address, optBh *types.BlockHeight) (types.GasUnits, error) {
 	toActor, err := st.GetActor(ctx, to)
 	if err != nil {
 		return types.NewGasUnits(0), errors.ApplyErrorPermanentWrapf(err, "failed to get To actor")
@@ -444,10 +445,10 @@ func (p *DefaultProcessor) PreviewQueryMethod(ctx context.Context, st state.Tree
 	}
 
 	// Set the gas limit to the max because this message send should always succeed; it doesn't cost gas.
-	gasTracker := vm.NewGasTracker()
+	gasTracker := procneeds.NewGasTracker()
 	gasTracker.MsgGasLimit = types.BlockGasLimit
 
-	vmCtxParams := vm.NewContextParams{
+	vmCtxParams := procneeds.NewContextParams{
 		To:          toActor,
 		Message:     msg,
 		State:       cachedSt,
@@ -456,8 +457,8 @@ func (p *DefaultProcessor) PreviewQueryMethod(ctx context.Context, st state.Tree
 		BlockHeight: optBh,
 		Actors:      p.actors,
 	}
-	vmCtx := vm.NewVMContext(vmCtxParams)
-	_, _, err = vm.Send(ctx, vmCtx)
+	vmCtx := procneeds.NewVMContext(vmCtxParams)
+	_, _, err = procneeds.Send(ctx, vmCtx)
 
 	return vmCtx.GasUnits(), err
 }
@@ -467,7 +468,7 @@ func (p *DefaultProcessor) PreviewQueryMethod(ctx context.Context, st state.Tree
 // should deal with trying to apply the message to the state tree whereas
 // ApplyMessage should deal with any side effects and how it should be presented
 // to the caller. attemptApplyMessage should only be called from ApplyMessage.
-func (p *DefaultProcessor) attemptApplyMessage(ctx context.Context, st *state.CachedTree, store vm.StorageMap, msg *types.UnsignedMessage, bh *types.BlockHeight, gasTracker *vm.GasTracker, ancestors []block.TipSet) (*types.MessageReceipt, error) {
+func (p *DefaultProcessor) attemptApplyMessage(ctx context.Context, st *state.CachedTree, store vm2.StorageMap, msg *types.UnsignedMessage, bh *types.BlockHeight, gasTracker *procneeds.GasTracker, ancestors []block.TipSet) (*types.MessageReceipt, error) {
 	gasTracker.ResetForNewMessage(msg)
 	if err := blockGasLimitError(gasTracker); err != nil {
 		return &types.MessageReceipt{
@@ -512,7 +513,7 @@ func (p *DefaultProcessor) attemptApplyMessage(ctx context.Context, st *state.Ca
 		return nil, errors.FaultErrorWrap(err, "failed to get To actor")
 	}
 
-	vmCtxParams := vm.NewContextParams{
+	vmCtxParams := procneeds.NewContextParams{
 		From:        fromActor,
 		To:          toActor,
 		Message:     msg,
@@ -523,9 +524,9 @@ func (p *DefaultProcessor) attemptApplyMessage(ctx context.Context, st *state.Ca
 		Ancestors:   ancestors,
 		Actors:      p.actors,
 	}
-	vmCtx := vm.NewVMContext(vmCtxParams)
+	vmCtx := procneeds.NewVMContext(vmCtxParams)
 
-	ret, exitCode, vmErr := vm.Send(ctx, vmCtx)
+	ret, exitCode, vmErr := procneeds.Send(ctx, vmCtx)
 	if errors.IsFault(vmErr) {
 		return nil, vmErr
 	}
@@ -553,7 +554,7 @@ type ApplyMessageResult struct {
 // ApplyMessagesAndPayRewards pays the block mining reward to the miner's owner and then applies
 // messages, in order, to a state tree.
 // Returns a message application result for each message.
-func (p *DefaultProcessor) ApplyMessagesAndPayRewards(ctx context.Context, st state.Tree, vms vm.StorageMap,
+func (p *DefaultProcessor) ApplyMessagesAndPayRewards(ctx context.Context, st state.Tree, vms vm2.StorageMap,
 	messages []*types.UnsignedMessage, minerOwnerAddr address.Address, bh *types.BlockHeight,
 	ancestors []block.TipSet) ([]*ApplyMessageResult, error) {
 	var results []*ApplyMessageResult
@@ -564,7 +565,7 @@ func (p *DefaultProcessor) ApplyMessagesAndPayRewards(ctx context.Context, st st
 	}
 
 	// Process all messages.
-	gasTracker := vm.NewGasTracker()
+	gasTracker := procneeds.NewGasTracker()
 	for _, msg := range messages {
 		r, err := p.ApplyMessage(ctx, st, vms, msg, minerOwnerAddr, bh, gasTracker, ancestors)
 		switch {
@@ -632,10 +633,10 @@ func rewardTransfer(ctx context.Context, fromAddr, toAddr address.Address, value
 		return errors.FaultErrorWrap(err, "failed to get To actor")
 	}
 
-	return vm.Transfer(fromActor, toActor, value)
+	return procneeds.Transfer(fromActor, toActor, value)
 }
 
-func blockGasLimitError(gasTracker *vm.GasTracker) error {
+func blockGasLimitError(gasTracker *procneeds.GasTracker) error {
 	if gasTracker.GasAboveBlockLimit() {
 		return errGasAboveBlockLimit
 	} else if gasTracker.GasTooHighForCurrentBlock() {
@@ -662,7 +663,7 @@ func isPermanentError(err error) bool {
 }
 
 // minerOwnerAddress finds the address of the owner of the given miner
-func (p *DefaultProcessor) minerOwnerAddress(ctx context.Context, st state.Tree, vms vm.StorageMap, minerAddr address.Address) (address.Address, error) {
+func (p *DefaultProcessor) minerOwnerAddress(ctx context.Context, st state.Tree, vms vm2.StorageMap, minerAddr address.Address) (address.Address, error) {
 	ret, code, err := p.CallQueryMethod(ctx, st, vms, minerAddr, miner.GetOwner, []byte{}, address.Undef, types.NewBlockHeight(0))
 	if err != nil {
 		return address.Undef, errors.FaultErrorWrap(err, "could not get miner owner")

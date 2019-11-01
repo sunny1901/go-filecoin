@@ -20,9 +20,9 @@ import (
 	th "github.com/filecoin-project/go-filecoin/internal/pkg/testhelpers"
 	tf "github.com/filecoin-project/go-filecoin/internal/pkg/testhelpers/testflags"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/types"
-	"github.com/filecoin-project/go-filecoin/internal/pkg/vm"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/address"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/state"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/vm2"
 )
 
 func TestNewExpected(t *testing.T) {
@@ -44,7 +44,7 @@ func requireNewValidTestBlock(t *testing.T, baseTipSet block.TipSet, stateRootCi
 
 // requireMakeBlocks sets up 3 blocks with 3 owner actors and 3 miner actors and puts them in the state tree.
 // the owner actors have associated mockSigners for signing blocks and tickets.
-func requireMakeBlocks(ctx context.Context, t *testing.T, pTipSet block.TipSet, tree state.Tree, vms vm.StorageMap) ([]*block.Block, map[address.Address]address.Address) {
+func requireMakeBlocks(ctx context.Context, t *testing.T, pTipSet block.TipSet, tree state.Tree, vms vm2.StorageMap) ([]*block.Block, map[address.Address]address.Address) {
 	// make a set of owner keypairs so they can sign blocks
 	mockSigner, kis := types.NewMockSignersAndKeyInfo(3)
 
@@ -102,7 +102,7 @@ func TestExpected_RunStateTransition_validateMining(t *testing.T) {
 		pTipSet := th.RequireNewTipSet(t, genesisBlock)
 		stateTree, err := state.LoadStateTree(ctx, cistore, genesisBlock.StateRoot)
 		require.NoError(t, err)
-		vms := vm.NewStorageMap(bstore)
+		vms := vm2.NewStorageMap(bstore)
 
 		blocks, minerToWorker := requireMakeBlocks(ctx, t, pTipSet, stateTree, vms)
 
@@ -124,7 +124,7 @@ func TestExpected_RunStateTransition_validateMining(t *testing.T) {
 		stateTree, err := state.LoadStateTree(ctx, cistore, genesisBlock.StateRoot)
 		require.NoError(t, err)
 
-		vms := vm.NewStorageMap(bstore)
+		vms := vm2.NewStorageMap(bstore)
 
 		blocks, minerToWorker := requireMakeBlocks(ctx, t, pTipSet, stateTree, vms)
 
@@ -143,7 +143,7 @@ func TestExpected_RunStateTransition_validateMining(t *testing.T) {
 		pTipSet := th.RequireNewTipSet(t, genesisBlock)
 		stateTree, err := state.LoadStateTree(ctx, cistore, genesisBlock.StateRoot)
 		require.NoError(t, err)
-		vms := vm.NewStorageMap(bstore)
+		vms := vm2.NewStorageMap(bstore)
 
 		blocks, minerToWorker := requireMakeBlocks(ctx, t, pTipSet, stateTree, vms)
 
@@ -173,7 +173,7 @@ func TestExpected_RunStateTransition_validateMining(t *testing.T) {
 		pTipSet := th.RequireNewTipSet(t, genesisBlock)
 		stateTree, err := state.LoadStateTree(ctx, cistore, genesisBlock.StateRoot)
 		require.NoError(t, err)
-		vms := vm.NewStorageMap(bstore)
+		vms := vm2.NewStorageMap(bstore)
 
 		blocks, minerToWorker := requireMakeBlocks(ctx, t, pTipSet, stateTree, vms)
 
@@ -210,7 +210,7 @@ func TestExpected_RunStateTransition_validateMining(t *testing.T) {
 		stateTree, err := state.LoadStateTree(ctx, cistore, genesisBlock.StateRoot)
 		require.NoError(t, err)
 
-		vms := vm.NewStorageMap(bstore)
+		vms := vm2.NewStorageMap(bstore)
 
 		blocks, minerToWorker := requireMakeBlocks(ctx, t, pTipSet, stateTree, vms)
 
@@ -230,7 +230,7 @@ func TestExpected_RunStateTransition_validateMining(t *testing.T) {
 		pTipSet := th.RequireNewTipSet(t, genesisBlock)
 		stateTree, err := state.LoadStateTree(ctx, cistore, genesisBlock.StateRoot)
 		require.NoError(t, err)
-		vms := vm.NewStorageMap(bstore)
+		vms := vm2.NewStorageMap(bstore)
 
 		blocks, minerToWorker := requireMakeBlocks(ctx, t, pTipSet, stateTree, vms)
 		// Give block 0 an invalid signature
@@ -251,7 +251,7 @@ func TestExpected_RunStateTransition_validateMining(t *testing.T) {
 		pTipSet := th.RequireNewTipSet(t, genesisBlock)
 		stateTree, err := state.LoadStateTree(ctx, cistore, genesisBlock.StateRoot)
 		require.NoError(t, err)
-		vms := vm.NewStorageMap(bstore)
+		vms := vm2.NewStorageMap(bstore)
 
 		blocks, minerToWorker := requireMakeBlocks(ctx, t, pTipSet, stateTree, vms)
 		tipSet := th.RequireNewTipSet(t, blocks...)
