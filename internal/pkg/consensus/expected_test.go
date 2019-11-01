@@ -81,6 +81,42 @@ func TestExpected_RunStateTransition_validateMining(t *testing.T) {
 		assert.EqualError(t, err, "block author did not win election")
 	})
 
+	t.Run("correct tickets processed in election and next ticket", func(t *testing.T) {
+		pTipSet := th.RequireNewTipSet(t, genesisBlock)
+		as := testActorState(t, kis)
+
+		nextRoot := setTree(ctx, t, kis, cistore, bstore, genesisBlock.StateRoot)
+		ancestors := make([]block.TipSet, 5)
+		for i := 0; i < consensus.ElectionLookback; i++ {
+			ancestorBlk := requireMakeNBlocks(t, 1, pTipSet, nextRoot, kis, mockSigner)
+			ancestors[i] = th.RequireNewTipSet(t, ancestorBlk...)
+			pTipSet = ancestors[i]
+		}
+
+		isLookingBack := func(ticket block.Ticket) {
+			expTicket, err := ancestors[consensus.ElectionLookback-1].MinTicket()
+			require.NoError(t, err)
+			assert.Equal(t, expTicket, ticket)
+		}
+		mockElection := consensus.NewMockElectionMachine(isLookingBack)
+
+		isOneBack := func(ticket block.Ticket) {
+			expTicket, err := ancestors[0].MinTicket()
+			require.NoError(t, err)
+			assert.Equal(t, expTicket, ticket)
+		}
+		mockTicketGen := consensus.NewMockTicketMachine(isOneBack)
+
+		exp := consensus.NewExpected(cistore, bstore, th.NewFakeProcessor(), as, th.BlockTimeTest, mockElection, mockTicketGen)
+
+		nextBlocks := requireMakeNBlocks(t, 3, pTipSet, nextRoot, kis, mockSigner)
+		tipSet := th.RequireNewTipSet(t, nextBlocks...)
+
+		emptyBLSMessages, emptyMessages := emptyMessages(len(nextBlocks))
+		_, _, err = exp.RunStateTransition(ctx, tipSet, emptyBLSMessages, emptyMessages, ancestors, uint64(nextBlocks[0].ParentWeight), nextRoot)
+		assert.NoError(t, err)
+	})
+
 	t.Run("fails when bls signature is not valid across bls messages", func(t *testing.T) {
 		as := testActorState(t, kis)
 		exp := consensus.NewExpected(cistore, bstore, th.NewFakeProcessor(), as, th.BlockTimeTest, &consensus.FakeElectionMachine{}, &consensus.FakeTicketMachine{})
@@ -205,7 +241,7 @@ func setupCborBlockstore() (*hamt.CborIpldStore, blockstore.Blockstore) {
 // requireMakeNBlocks sets up 3 blocks with 3 owner actors and 3 miner actors and puts them in the state tree.
 // the owner actors have associated mockSigners for signing blocks and tickets.
 func requireMakeNBlocks(t *testing.T, n int, pTipSet block.TipSet, root cid.Cid, kis []types.KeyInfo, signer types.Signer) []*block.Block {
-	require.True(t, n >= len(kis))
+	require.True(t, n <= len(kis))
 	minerAddrs := minerAddrsFromKis(t, kis)
 	m2w := minerToWorkerFromKis(t, kis)
 	blocks := make([]*block.Block, n)

@@ -30,35 +30,6 @@ import (
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/state"
 )
 
-type mockTicketGen struct {
-	fn func(block.Ticket)
-}
-
-func newMockTicketGen(f func(block.Ticket)) *mockTicketGen {
-	return &mockTicketGen{fn: f}
-}
-
-func (mtg *mockTicketGen) NextTicket(ticket block.Ticket, genAddr address.Address, signer types.Signer) (block.Ticket, error) {
-	mtg.fn(ticket)
-	return consensus.MakeFakeTicketForTest(), nil
-}
-
-type mockElectionMachine struct {
-	fn func(block.Ticket)
-}
-
-func newMockElectionMachine(f func(block.Ticket)) *mockElectionMachine {
-	return &mockElectionMachine{fn: f}
-}
-
-func (mem *mockElectionMachine) RunElection(ticket block.Ticket, candidateAddr address.Address, signer types.Signer, nullCount uint64) (block.VRFPi, error) {
-	mem.fn(ticket)
-	return consensus.MakeFakeElectionProofForTest(), nil
-}
-func (mem *mockElectionMachine) IsElectionWinner(ctx context.Context, ptv consensus.PowerTableView, ticket block.Ticket, nullCount uint64, electionProof block.VRFPi, signerAddr, minerAddr address.Address) (bool, error) {
-	return true, nil
-}
-
 func TestLookbackElection(t *testing.T) {
 	tf.UnitTest(t)
 
@@ -86,7 +57,7 @@ func TestLookbackElection(t *testing.T) {
 	t.Run("Election sees ticket lookback ancestors back", func(t *testing.T) {
 		electionTicket, err := ancestors[lookback-1].MinTicket()
 		require.NoError(t, err)
-		mem := newMockElectionMachine(func(ticket block.Ticket) {
+		mem := consensus.NewMockElectionMachine(func(ticket block.Ticket) {
 			assert.Equal(t, electionTicket, ticket)
 		})
 
@@ -121,7 +92,7 @@ func TestLookbackElection(t *testing.T) {
 	t.Run("Ticket gensees ticket 1 ancestor back", func(t *testing.T) {
 		genTicket, err := ancestors[0].MinTicket()
 		require.NoError(t, err)
-		mtm := newMockTicketGen(func(ticket block.Ticket) {
+		mtm := consensus.NewMockTicketMachine(func(ticket block.Ticket) {
 			assert.Equal(t, genTicket, ticket)
 		})
 
@@ -185,7 +156,7 @@ func Test_Mine(t *testing.T) {
 		sawTicket := func(_ block.Ticket) {
 			ticketGen = true
 		}
-		testTicketGen := newMockTicketGen(sawTicket)
+		testTicketGen := consensus.NewMockTicketMachine(sawTicket)
 		ctx, cancel := context.WithCancel(context.Background())
 		outCh := make(chan mining.Output)
 		worker := mining.NewDefaultWorker(mining.WorkerParameters{
@@ -220,7 +191,7 @@ func Test_Mine(t *testing.T) {
 		sawTicket := func(_ block.Ticket) {
 			ticketGen = true
 		}
-		testTicketGen := newMockTicketGen(sawTicket)
+		testTicketGen := consensus.NewMockTicketMachine(sawTicket)
 		ctx, cancel := context.WithCancel(context.Background())
 		worker := mining.NewDefaultWorker(mining.WorkerParameters{
 			API: th.NewDefaultFakeWorkerPorcelainAPI(blockSignerAddr),
@@ -257,7 +228,7 @@ func Test_Mine(t *testing.T) {
 		sawTicket := func(_ block.Ticket) {
 			ticketGen = true
 		}
-		testTicketGen := newMockTicketGen(sawTicket)
+		testTicketGen := consensus.NewMockTicketMachine(sawTicket)
 		worker := mining.NewDefaultWorker(mining.WorkerParameters{
 			API: th.NewDefaultFakeWorkerPorcelainAPI(blockSignerAddr),
 
