@@ -65,7 +65,7 @@ type Processor interface {
 	ProcessBlock(context.Context, state.Tree, vm.StorageMap, *block.Block, []*types.UnsignedMessage, []block.TipSet) ([]*ApplicationResult, error)
 
 	// ProcessTipSet processes all messages in a tip set.
-	ProcessTipSet(context.Context, state.Tree, vm.StorageMap, block.TipSet, [][]*types.UnsignedMessage, []block.TipSet) (*ProcessTipSetResponse, error)
+	ProcessTipSet(context.Context, state.Tree, vm.StorageMap, block.TipSet, [][]*types.UnsignedMessage, []block.TipSet) ([]*ApplyMessageResult, error)
 }
 
 // TicketValidator validates that an input ticket is valid.
@@ -243,12 +243,11 @@ func (c *Expected) validateMining(ctx context.Context, st state.Tree, ts block.T
 // block with blocks sorted by their ticket bytes.  The output state must be
 // flushed after calling to guarantee that the state transitions propagate.
 //
-// An error is returned if individual blocks contain messages that do not
-// lead to successful state transitions.  An error is also returned if the node
-// faults while running aggregate state computation.
+// An error is returned if *individual blocks* contain messages that do not
+// lead to successful state transitions. Errors that arise only due to conflicts between
+// messages in different blocks are dropped on the floor (and no receipt is emitted).
 func (c *Expected) runMessages(ctx context.Context, st state.Tree, vms vm.StorageMap, ts block.TipSet, blsMessages [][]*types.UnsignedMessage, secpMessages [][]*types.UnsignedMessage, ancestors []block.TipSet) (state.Tree, []*types.MessageReceipt, error) {
 	var cpySt state.Tree
-	var results []*ApplicationResult
 
 	// TODO: don't process messages twice
 	for i := 0; i < ts.Len(); i++ {
@@ -265,7 +264,7 @@ func (c *Expected) runMessages(ctx context.Context, st state.Tree, vms vm.Storag
 
 		// Combine messages to process BLS first.
 		msgs := append(blsMessages[i], secpMessages[i]...)
-		results, err = c.processor.ProcessBlock(ctx, cpySt, vms, blk, msgs, ancestors)
+		_, err = c.processor.ProcessBlock(ctx, cpySt, vms, blk, msgs, ancestors)
 		if err != nil {
 			return nil, nil, errors.Wrap(err, "error validating block state")
 		}
@@ -280,27 +279,22 @@ func (c *Expected) runMessages(ctx context.Context, st state.Tree, vms vm.Storag
 		}
 	}
 
-	if ts.Len() <= 1 { // block validation state == aggregate parent state
-		receipts := make([]*types.MessageReceipt, len(results))
-		for i, res := range results {
-			receipts[i] = res.Receipt
-		}
-		return cpySt, receipts, nil
-	}
-
 	// multiblock tipsets require reapplying messages to get aggregate state
 	// NOTE: It is possible to optimize further by applying block validation
 	// in sorted order to reuse first block transitions as the starting state
 	// for the tipSetProcessor.
 	allMessages := append(blsMessages, secpMessages...)
-	resp, err := c.processor.ProcessTipSet(ctx, st, vms, ts, allMessages, ancestors)
+	results, err := c.processor.ProcessTipSet(ctx, st, vms, ts, allMessages, ancestors)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "error validating tipset")
 	}
 
-	receipts := make([]*types.MessageReceipt, len(resp.Results))
-	for i, res := range results {
-		receipts[i] = res.Receipt
+	var receipts []*types.MessageReceipt
+	for _, res := range results {
+		if res.Failure == nil {
+			receipts = append(receipts, res.Receipt)
+		}
+		// Else drop the error on the floor.
 	}
 
 	return st, receipts, nil
