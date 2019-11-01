@@ -55,7 +55,7 @@ func (mem *mockElectionMachine) RunElection(ticket block.Ticket, candidateAddr a
 	mem.fn(ticket)
 	return consensus.MakeFakeElectionProofForTest(), nil
 }
-func (fem *mockElectionMachine) IsElectionWinner(ctx context.Context, ptv consensus.PowerTableView, ticket block.Ticket, nullCount uint64, electionProof block.VRFPi, signerAddr, minerAddr address.Address) (bool, error) {
+func (mem *mockElectionMachine) IsElectionWinner(ctx context.Context, ptv consensus.PowerTableView, ticket block.Ticket, nullCount uint64, electionProof block.VRFPi, signerAddr, minerAddr address.Address) (bool, error) {
 	return true, nil
 }
 
