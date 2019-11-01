@@ -90,9 +90,6 @@ type SnapshotGenerator interface {
 
 // Expected implements expected consensus.
 type Expected struct {
-	// validator provides a set of methods used to validate a block.
-	BlockValidator
-
 	// ElectionValidator validates election proofs.
 	ElectionValidator
 
@@ -110,8 +107,6 @@ type Expected struct {
 	// processor is what we use to process messages and pay rewards
 	processor Processor
 
-	genesisCid cid.Cid
-
 	// actorState provides produces snapshots
 	actorState SnapshotGenerator
 
@@ -122,15 +117,13 @@ type Expected struct {
 var _ Protocol = (*Expected)(nil)
 
 // NewExpected is the constructor for the Expected consenus.Protocol module.
-func NewExpected(cs *hamt.CborIpldStore, bs blockstore.Blockstore, processor Processor, v BlockValidator, actorState SnapshotGenerator, gCid cid.Cid, bt time.Duration, ev ElectionValidator, tv TicketValidator) *Expected {
+func NewExpected(cs *hamt.CborIpldStore, bs blockstore.Blockstore, processor Processor, actorState SnapshotGenerator, bt time.Duration, ev ElectionValidator, tv TicketValidator) *Expected {
 	return &Expected{
 		cstore:            cs,
 		blockTime:         bt,
 		bstore:            bs,
 		processor:         processor,
 		actorState:        actorState,
-		genesisCid:        gCid,
-		BlockValidator:    v,
 		ElectionValidator: ev,
 		TicketValidator:   tv,
 	}
