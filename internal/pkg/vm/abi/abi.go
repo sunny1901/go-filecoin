@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"reflect"
 
+	"github.com/ipfs/go-cid"
 	"github.com/libp2p/go-libp2p-core/peer"
 
 	"github.com/filecoin-project/go-filecoin/internal/pkg/encoding"
@@ -30,6 +31,8 @@ const (
 	BytesAmount
 	// ChannelID is a *types.ChannelID
 	ChannelID
+	// Cid is a cid.Cid
+	Cid
 	// BlockHeight is a *types.BlockHeight
 	BlockHeight
 	// Integer is a *big.Int
@@ -38,7 +41,7 @@ const (
 	Bytes
 	// String is a string
 	String
-	// UintArray is an array of uint64
+	// UintArray is an array of types.Uint64
 	UintArray
 	// PeerID is a libp2p peer ID
 	PeerID
@@ -65,6 +68,10 @@ const (
 	MinerPoStStates
 	// FaultSet is the faults generated during PoSt generation
 	FaultSet
+	// PowerReport is a tuple of *types.ByteAmount
+	PowerReport
+	// FaultReport is a triple of integers
+	FaultReport
 )
 
 func (t Type) String() string {
@@ -79,6 +86,8 @@ func (t Type) String() string {
 		return "*types.BytesAmount"
 	case ChannelID:
 		return "*types.ChannelID"
+	case Cid:
+		return "cid.Cid"
 	case BlockHeight:
 		return "*types.BlockHeight"
 	case Integer:
@@ -88,7 +97,7 @@ func (t Type) String() string {
 	case String:
 		return "string"
 	case UintArray:
-		return "[]uint64"
+		return "[]types.Uint64"
 	case PeerID:
 		return "peer.ID"
 	case SectorID:
@@ -113,6 +122,10 @@ func (t Type) String() string {
 		return "*map[string]uint64"
 	case FaultSet:
 		return "types.FaultSet"
+	case PowerReport:
+		return "types.PowerReport"
+	case FaultReport:
+		return "types.FaultReport"
 	default:
 		return "<unknown type>"
 	}
@@ -136,6 +149,8 @@ func (av *Value) String() string {
 		return av.Val.(*types.BytesAmount).String()
 	case ChannelID:
 		return av.Val.(*types.ChannelID).String()
+	case Cid:
+		return av.Val.(cid.Cid).String()
 	case BlockHeight:
 		return av.Val.(*types.BlockHeight).String()
 	case Integer:
@@ -145,7 +160,7 @@ func (av *Value) String() string {
 	case String:
 		return av.Val.(string)
 	case UintArray:
-		return fmt.Sprint(av.Val.([]uint64))
+		return fmt.Sprint(av.Val.([]types.Uint64))
 	case PeerID:
 		return av.Val.(peer.ID).String()
 	case SectorID:
@@ -170,6 +185,10 @@ func (av *Value) String() string {
 		return fmt.Sprint(av.Val.(*map[address.Address]uint8))
 	case FaultSet:
 		return av.Val.(types.FaultSet).String()
+	case PowerReport:
+		return fmt.Sprint(av.Val.(types.PowerReport))
+	case FaultReport:
+		return fmt.Sprint(av.Val.(types.FaultReport))
 	default:
 		return "<unknown type>"
 	}
@@ -213,6 +232,12 @@ func (av *Value) Serialize() ([]byte, error) {
 			return nil, &typeError{types.ChannelID{}, av.Val}
 		}
 		return ba.Bytes(), nil
+	case Cid:
+		c, ok := av.Val.(cid.Cid)
+		if !ok {
+			return nil, &typeError{cid.Cid{}, av.Val}
+		}
+		return c.Bytes(), nil
 	case BlockHeight:
 		ba, ok := av.Val.(*types.BlockHeight)
 		if !ok {
@@ -242,9 +267,9 @@ func (av *Value) Serialize() ([]byte, error) {
 
 		return []byte(s), nil
 	case UintArray:
-		arr, ok := av.Val.([]uint64)
+		arr, ok := av.Val.([]types.Uint64)
 		if !ok {
-			return nil, &typeError{[]uint64{}, av.Val}
+			return nil, &typeError{[]types.Uint64{}, av.Val}
 		}
 
 		return encoding.Encode(arr)
@@ -332,6 +357,18 @@ func (av *Value) Serialize() ([]byte, error) {
 			return nil, &typeError{types.FaultSet{}, av.Val}
 		}
 		return encoding.Encode(fs)
+	case PowerReport:
+		pr, ok := av.Val.(types.PowerReport)
+		if !ok {
+			return nil, &typeError{types.PowerReport{}, av.Val}
+		}
+		return encoding.Encode(pr)
+	case FaultReport:
+		fr, ok := av.Val.(types.FaultReport)
+		if !ok {
+			return nil, &typeError{types.FaultReport{}, av.Val}
+		}
+		return encoding.Encode(fr)
 	default:
 		return nil, fmt.Errorf("unrecognized Type: %d", av.Type)
 	}
@@ -355,6 +392,8 @@ func ToValues(i []interface{}) ([]*Value, error) {
 			out = append(out, &Value{Type: BytesAmount, Val: v})
 		case *types.ChannelID:
 			out = append(out, &Value{Type: ChannelID, Val: v})
+		case cid.Cid:
+			out = append(out, &Value{Type: Cid, Val: v})
 		case *types.BlockHeight:
 			out = append(out, &Value{Type: BlockHeight, Val: v})
 		case *big.Int:
@@ -363,7 +402,7 @@ func ToValues(i []interface{}) ([]*Value, error) {
 			out = append(out, &Value{Type: Bytes, Val: v})
 		case string:
 			out = append(out, &Value{Type: String, Val: v})
-		case []uint64:
+		case []types.Uint64:
 			out = append(out, &Value{Type: UintArray, Val: v})
 		case peer.ID:
 			out = append(out, &Value{Type: PeerID, Val: v})
@@ -389,6 +428,10 @@ func ToValues(i []interface{}) ([]*Value, error) {
 			out = append(out, &Value{Type: MinerPoStStates, Val: v})
 		case types.FaultSet:
 			out = append(out, &Value{Type: FaultSet, Val: v})
+		case types.PowerReport:
+			out = append(out, &Value{Type: PowerReport, Val: v})
+		case types.FaultReport:
+			out = append(out, &Value{Type: FaultReport, Val: v})
 		default:
 			return nil, fmt.Errorf("unsupported type: %T", v)
 		}
@@ -443,6 +486,15 @@ func Deserialize(data []byte, t Type) (*Value, error) {
 			Type: t,
 			Val:  types.NewChannelIDFromBytes(data),
 		}, nil
+	case Cid:
+		c, err := cid.Cast(data)
+		if err != nil {
+			return nil, err
+		}
+		return &Value{
+			Type: t,
+			Val:  c,
+		}, nil
 	case BlockHeight:
 		return &Value{
 			Type: t,
@@ -459,7 +511,7 @@ func Deserialize(data []byte, t Type) (*Value, error) {
 			Val:  string(data),
 		}, nil
 	case UintArray:
-		var arr []uint64
+		var arr []types.Uint64
 		if err := encoding.Decode(data, &arr); err != nil {
 			return nil, err
 		}
@@ -560,6 +612,26 @@ func Deserialize(data []byte, t Type) (*Value, error) {
 			Type: t,
 			Val:  fs,
 		}, nil
+	case PowerReport:
+		var pr types.PowerReport
+		err := encoding.Decode(data, &pr)
+		if err != nil {
+			return nil, err
+		}
+		return &Value{
+			Type: t,
+			Val:  pr,
+		}, nil
+	case FaultReport:
+		var fr types.FaultReport
+		err := encoding.Decode(data, &fr)
+		if err != nil {
+			return nil, err
+		}
+		return &Value{
+			Type: t,
+			Val:  fr,
+		}, nil
 	case Invalid:
 		return nil, ErrInvalidType
 	default:
@@ -573,10 +645,11 @@ var typeTable = map[Type]reflect.Type{
 	Bytes:           reflect.TypeOf([]byte{}),
 	BytesAmount:     reflect.TypeOf(&types.BytesAmount{}),
 	ChannelID:       reflect.TypeOf(&types.ChannelID{}),
+	Cid:             reflect.TypeOf(cid.Cid{}),
 	BlockHeight:     reflect.TypeOf(&types.BlockHeight{}),
 	Integer:         reflect.TypeOf(&big.Int{}),
 	String:          reflect.TypeOf(string("")),
-	UintArray:       reflect.TypeOf([]uint64{}),
+	UintArray:       reflect.TypeOf([]types.Uint64{}),
 	PeerID:          reflect.TypeOf(peer.ID("")),
 	SectorID:        reflect.TypeOf(uint64(0)),
 	CommitmentsMap:  reflect.TypeOf(map[string]types.Commitments{}),
@@ -589,6 +662,8 @@ var typeTable = map[Type]reflect.Type{
 	IntSet:          reflect.TypeOf(types.IntSet{}),
 	MinerPoStStates: reflect.TypeOf(&map[string]uint64{}),
 	FaultSet:        reflect.TypeOf(types.FaultSet{}),
+	PowerReport:     reflect.TypeOf(types.PowerReport{}),
+	FaultReport:     reflect.TypeOf(types.FaultReport{}),
 }
 
 // TypeMatches returns whether or not 'val' is the go type expected for the given ABI type

@@ -4,12 +4,11 @@ import (
 	"context"
 	"io/ioutil"
 	"testing"
+	"time"
 
-	bserv "github.com/ipfs/go-blockservice"
 	ds "github.com/ipfs/go-datastore"
 	"github.com/ipfs/go-hamt-ipld"
 	"github.com/ipfs/go-ipfs-blockstore"
-	"github.com/ipfs/go-ipfs-exchange-offline"
 
 	th "github.com/filecoin-project/go-filecoin/internal/pkg/testhelpers"
 	tf "github.com/filecoin-project/go-filecoin/internal/pkg/testhelpers/testflags"
@@ -18,6 +17,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 )
+
+var defaultGenesisTime = time.Unix(123456789, 0)
 
 var testConfig = &GenesisCfg{
 	ProofsMode: types.TestProofsMode,
@@ -44,7 +45,7 @@ func TestGenGenLoading(t *testing.T) {
 	fi, err := ioutil.TempFile("", "gengentest")
 	assert.NoError(t, err)
 
-	_, err = GenGenesisCar(testConfig, fi, 0)
+	_, err = GenGenesisCar(testConfig, fi, 0, defaultGenesisTime)
 	assert.NoError(t, err)
 	assert.NoError(t, fi.Close())
 
@@ -62,17 +63,12 @@ func TestGenGenLoading(t *testing.T) {
 func TestGenGenDeterministicBetweenBuilds(t *testing.T) {
 	tf.UnitTest(t)
 
+	ctx := context.Background()
 	var info *RenderedGenInfo
 	for i := 0; i < 50; i++ {
-		mds := ds.NewMapDatastore()
-		bstore := blockstore.NewBlockstore(mds)
-		offl := offline.Exchange(bstore)
-		blkserv := bserv.New(bstore, offl)
-		cst := &hamt.CborIpldStore{Blocks: blkserv}
-
-		ctx := context.Background()
-
-		inf, err := GenGen(ctx, testConfig, cst, bstore, 0)
+		bstore := blockstore.NewBlockstore(ds.NewMapDatastore())
+		cst := hamt.CSTFromBstore(bstore)
+		inf, err := GenGen(ctx, testConfig, cst, bstore, 0, defaultGenesisTime)
 		assert.NoError(t, err)
 		if info == nil {
 			info = inf

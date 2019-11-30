@@ -4,10 +4,15 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/big"
 	mrand "math/rand"
 	"strconv"
+	"time"
 
 	"github.com/filecoin-project/go-amt-ipld"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/abi"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/initactor"
+
 	"github.com/filecoin-project/go-bls-sigs"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/block"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/consensus"
@@ -17,8 +22,7 @@ import (
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/account"
-	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/miner"
-	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/storagemarket"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/power"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/address"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/state"
 
@@ -32,7 +36,7 @@ import (
 	dag "github.com/ipfs/go-merkledag"
 	"github.com/libp2p/go-libp2p-core/peer"
 	mh "github.com/multiformats/go-multihash"
-	"github.com/whyrusleeping/cbor-gen"
+	typegen "github.com/whyrusleeping/cbor-gen"
 )
 
 // CreateStorageMinerConfig holds configuration options used to create a storage
@@ -105,14 +109,14 @@ type RenderedMinerInfo struct {
 // the final genesis block.
 //
 // WARNING: Do not use maps in this code, they will make this code non deterministic.
-func GenGen(ctx context.Context, cfg *GenesisCfg, cst *hamt.CborIpldStore, bs blockstore.Blockstore, seed int64) (*RenderedGenInfo, error) {
+func GenGen(ctx context.Context, cfg *GenesisCfg, cst *hamt.CborIpldStore, bs blockstore.Blockstore, seed int64, genesisTime time.Time) (*RenderedGenInfo, error) {
 	pnrg := mrand.New(mrand.NewSource(seed))
 	keys, err := genKeys(cfg.Keys, pnrg)
 	if err != nil {
 		return nil, err
 	}
 
-	st := state.NewEmptyStateTree(cst)
+	st := state.NewTree(cst)
 	storageMap := vm.NewStorageMap(bs)
 
 	if err := consensus.SetupDefaultActors(ctx, st, storageMap, cfg.ProofsMode, cfg.Network); err != nil {
@@ -156,6 +160,7 @@ func GenGen(ctx context.Context, cfg *GenesisCfg, cst *hamt.CborIpldStore, bs bl
 		MessageReceipts: emptyAMTCid,
 		BLSAggregateSig: emptyBLSSignature[:],
 		Ticket:          block.Ticket{VRFProof: []byte{0xec}},
+		Timestamp:       types.Uint64(genesisTime.Unix()),
 	}
 
 	c, err := cst.Put(ctx, geneblk)
@@ -256,59 +261,44 @@ func setupMiners(st state.Tree, sm vm.StorageMap, keys []*types.KeyInfo, miners 
 			return nil, err
 		}
 
-		ret, err := applyMessageDirect(ctx, st, sm, addr, address.StorageMarketAddress, types.NewAttoFILFromFIL(100000), storagemarket.CreateStorageMiner, types.NewBytesAmount(m.SectorSize), pid)
+		ret, err := applyMessageDirect(ctx, st, sm, addr, address.PowerAddress, types.NewAttoFILFromFIL(100000), power.CreateStorageMiner, addr, addr, pid, types.NewBytesAmount(m.SectorSize))
 		if err != nil {
 			return nil, err
 		}
 
-		// get miner address
+		// get miner actor address
 		maddr, err := address.NewFromBytes(ret[0])
 		if err != nil {
 			return nil, err
 		}
 
+		// lookup id address for actor address
+		ret, err = applyMessageDirect(ctx, st, sm, addr, address.InitAddress, types.ZeroAttoFIL, initactor.GetActorIDForAddress, maddr)
+		if err != nil {
+			return nil, err
+		}
+
+		mID, err := abi.Deserialize(ret[0], abi.Integer)
+		if err != nil {
+			return nil, err
+		}
+
+		mIDAddr, err := address.NewIDAddress(mID.Val.(*big.Int).Uint64())
+		if err != nil {
+			return nil, err
+		}
+
 		minfos = append(minfos, RenderedMinerInfo{
-			Address: maddr,
+			Address: mIDAddr,
 			Owner:   m.Owner,
 			Power:   types.NewBytesAmount(m.SectorSize * m.NumCommittedSectors),
 		})
 
-		// commit sector to add power
+		// add power directly to power table
 		for i := uint64(0); i < m.NumCommittedSectors; i++ {
-			// the following statement fakes out the behavior of the SectorBuilder.sectorIDNonce,
-			// which is initialized to 0 and incremented (for the first sector) to 1
-			sectorID := i + 1
+			powerReport := types.NewPowerReport(m.SectorSize*m.NumCommittedSectors, 0)
 
-			commD := make([]byte, 32)
-			commR := make([]byte, 32)
-			commRStar := make([]byte, 32)
-			sealProof := make([]byte, types.TwoPoRepProofPartitions.ProofLen())
-			if _, err := pnrg.Read(commD[:]); err != nil {
-				return nil, err
-			}
-			if _, err := pnrg.Read(commR[:]); err != nil {
-				return nil, err
-			}
-			if _, err := pnrg.Read(commRStar[:]); err != nil {
-				return nil, err
-			}
-			if _, err := pnrg.Read(sealProof[:]); err != nil {
-				return nil, err
-			}
-			_, err := applyMessageDirect(ctx, st, sm, addr, maddr, types.NewAttoFILFromFIL(0), miner.CommitSector, sectorID, commD, commR, commRStar, sealProof)
-			if err != nil {
-				return nil, err
-			}
-		}
-		if m.NumCommittedSectors > 0 {
-			// Now submit a dummy PoSt right away to trigger power updates.
-			// Don't worry, bootstrap miner actors don't need to verify
-			// that the PoSt is well formed.
-			poStProof := make([]byte, types.OnePoStProofPartition.ProofLen())
-			if _, err := pnrg.Read(poStProof[:]); err != nil {
-				return nil, err
-			}
-			_, err = applyMessageDirect(ctx, st, sm, addr, maddr, types.NewAttoFILFromFIL(0), miner.SubmitPoSt, poStProof, types.EmptyFaultSet(), types.EmptyIntSet())
+			_, err := applyMessageDirect(ctx, st, sm, addr, address.PowerAddress, types.NewAttoFILFromFIL(0), power.ProcessPowerReport, powerReport, mIDAddr)
 			if err != nil {
 				return nil, err
 			}
@@ -319,18 +309,14 @@ func setupMiners(st state.Tree, sm vm.StorageMap, keys []*types.KeyInfo, miners 
 }
 
 // GenGenesisCar generates a car for the given genesis configuration
-func GenGenesisCar(cfg *GenesisCfg, out io.Writer, seed int64) (*RenderedGenInfo, error) {
-	// TODO: these six lines are ugly. We can do better...
-	mds := ds.NewMapDatastore()
-	bstore := blockstore.NewBlockstore(mds)
-	offl := offline.Exchange(bstore)
-	blkserv := bserv.New(bstore, offl)
-	cst := &hamt.CborIpldStore{Blocks: blkserv}
-	dserv := dag.NewDAGService(blkserv)
-
+func GenGenesisCar(cfg *GenesisCfg, out io.Writer, seed int64, genesisTime time.Time) (*RenderedGenInfo, error) {
 	ctx := context.Background()
 
-	info, err := GenGen(ctx, cfg, cst, bstore, seed)
+	bstore := blockstore.NewBlockstore(ds.NewMapDatastore())
+	cst := hamt.CSTFromBstore(bstore)
+	dserv := dag.NewDAGService(bserv.New(bstore, offline.Exchange(bstore)))
+
+	info, err := GenGen(ctx, cfg, cst, bstore, seed, genesisTime)
 	if err != nil {
 		return nil, err
 	}

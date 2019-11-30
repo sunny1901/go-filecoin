@@ -1,4 +1,4 @@
-package vm
+package vmcontext
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"github.com/ipfs/go-cid"
 	"github.com/ipfs/go-datastore"
 	"github.com/ipfs/go-hamt-ipld"
-	"github.com/ipfs/go-ipfs-blockstore"
+	blockstore "github.com/ipfs/go-ipfs-blockstore"
 	cbor "github.com/ipfs/go-ipld-cbor"
 	xerrors "github.com/pkg/errors"
 
@@ -21,8 +21,10 @@ import (
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/account"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/address"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/errors"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/internal/dispatch"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/internal/gastracker"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/internal/storagemap"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/state"
-	"github.com/filecoin-project/go-filecoin/internal/pkg/vm2/vminternal/dispatch"
 )
 
 func TestVMContextStorage(t *testing.T) {
@@ -32,11 +34,11 @@ func TestVMContextStorage(t *testing.T) {
 	ctx := context.Background()
 
 	cst := hamt.NewCborStore()
-	st := state.NewEmptyStateTree(cst)
-	cstate := state.NewCachedStateTree(st)
+	st := state.NewTree(cst)
+	cstate := state.NewCachedTree(st)
 
 	bs := blockstore.NewBlockstore(datastore.NewMapDatastore())
-	vms := NewStorageMap(bs)
+	vms := storagemap.NewStorageMap(bs)
 
 	toActor, err := account.NewActor(types.ZeroAttoFIL)
 	assert.NoError(t, err)
@@ -55,7 +57,7 @@ func TestVMContextStorage(t *testing.T) {
 		Message:     msg,
 		State:       cstate,
 		StorageMap:  vms,
-		GasTracker:  NewGasTracker(),
+		GasTracker:  gastracker.NewGasTracker(),
 		BlockHeight: types.NewBlockHeight(0),
 	}
 	vmCtx := NewVMContext(vmCtxParams)
@@ -91,19 +93,24 @@ func TestVMContextSendFailures(t *testing.T) {
 	}
 	fakeActorCid := types.NewCidForTestGetter()()
 	mockStateTree.BuiltinActors[fakeActorCid] = &actor.FakeActor{}
-	tree := state.NewCachedStateTree(&mockStateTree)
+	tree := state.NewCachedTree(&mockStateTree)
 	bs := blockstore.NewBlockstore(datastore.NewMapDatastore())
-	vms := NewStorageMap(bs)
+	vms := storagemap.NewStorageMap(bs)
 
-	vmCtxParams := NewContextParams{
-		From:        actor1,
-		To:          actor2,
-		Message:     newMsg(),
-		State:       tree,
-		StorageMap:  vms,
-		GasTracker:  NewGasTracker(),
-		BlockHeight: types.NewBlockHeight(0),
-		Actors:      &mockStateTree,
+	msg := newMsg()
+
+	vmCtxParams := func() NewContextParams {
+		return NewContextParams{
+			From:        actor1,
+			To:          actor2,
+			Message:     msg,
+			OriginMsg:   msg,
+			State:       tree,
+			StorageMap:  vms,
+			GasTracker:  gastracker.NewGasTracker(),
+			BlockHeight: types.NewBlockHeight(0),
+			Actors:      &mockStateTree,
+		}
 	}
 
 	fooID := types.MethodID(8272)
@@ -117,7 +124,7 @@ func TestVMContextSendFailures(t *testing.T) {
 			},
 		}
 
-		ctx := NewVMContext(vmCtxParams)
+		ctx := NewVMContext(vmCtxParams())
 		ctx.deps = deps
 
 		_, code, err := ctx.Send(newAddress(), fooID, types.ZeroAttoFIL, []interface{}{})
@@ -141,7 +148,7 @@ func TestVMContextSendFailures(t *testing.T) {
 			},
 		}
 
-		ctx := NewVMContext(vmCtxParams)
+		ctx := NewVMContext(vmCtxParams())
 		ctx.deps = deps
 
 		_, code, err := ctx.Send(newAddress(), fooID, types.ZeroAttoFIL, []interface{}{})
@@ -169,9 +176,11 @@ func TestVMContextSendFailures(t *testing.T) {
 				return nil, nil
 			},
 		}
-		vmCtxParams.Message = msg
-		ctx := NewVMContext(vmCtxParams)
+		params := vmCtxParams()
+		params.Message = msg
+		ctx := NewVMContext(params)
 		ctx.deps = deps
+		ctx.toAddr = msg.To
 
 		_, code, err := ctx.Send(to, fooID, types.ZeroAttoFIL, []interface{}{})
 
@@ -199,8 +208,9 @@ func TestVMContextSendFailures(t *testing.T) {
 			},
 		}
 
-		vmCtxParams.Message = newMsg()
-		ctx := NewVMContext(vmCtxParams)
+		params := vmCtxParams()
+		params.Message = newMsg()
+		ctx := NewVMContext(params)
 		ctx.deps = deps
 
 		_, code, err := ctx.Send(newAddress(), fooID, types.ZeroAttoFIL, []interface{}{})
@@ -224,7 +234,7 @@ func TestVMContextSendFailures(t *testing.T) {
 				calls = append(calls, "GetOrCreateActor")
 				return f()
 			},
-			Send: func(ctx context.Context, vmCtx *Context) ([][]byte, uint8, error) {
+			Send: func(ctx context.Context, vmCtx ExtendedRuntime) ([][]byte, uint8, error) {
 				calls = append(calls, "Send")
 				return nil, 123, expectedVMSendErr
 			},
@@ -234,7 +244,7 @@ func TestVMContextSendFailures(t *testing.T) {
 			},
 		}
 
-		ctx := NewVMContext(vmCtxParams)
+		ctx := NewVMContext(vmCtxParams())
 		ctx.deps = deps
 
 		_, code, err := ctx.Send(newAddress(), fooID, types.ZeroAttoFIL, []interface{}{})
@@ -245,49 +255,157 @@ func TestVMContextSendFailures(t *testing.T) {
 		assert.Equal(t, []string{"ToValues", "EncodeValues", "GetOrCreateActor", "Send"}, calls)
 	})
 
+	t.Run("AddressForNewActor uses origin message", func(t *testing.T) {
+		vmctx := NewVMContext(vmCtxParams())
+		addr1, err := vmctx.LegacyAddressForNewActor()
+		require.NoError(t, err)
+
+		assert.Equal(t, addr1.Protocol(), address.Actor)
+
+		// vmctx with same origin message produces same addr
+		addr2, err := NewVMContext(vmCtxParams()).LegacyAddressForNewActor()
+		require.NoError(t, err)
+		assert.Equal(t, addr2, addr1)
+
+		// vmctx with different origin message produces different addr
+		params := vmCtxParams()
+		params.OriginMsg = newMsg()
+		params.OriginMsg.From = newAddress()
+		params.OriginMsg.CallSeqNum = 42
+
+		addr3, err := NewVMContext(params).LegacyAddressForNewActor()
+		require.NoError(t, err)
+		assert.NotEqual(t, addr3, addr1)
+	})
+
 	t.Run("creates new actor from cid", func(t *testing.T) {
 		ctx := context.Background()
-		vmctx := NewVMContext(vmCtxParams)
-		addr, err := vmctx.AddressForNewActor()
+		vmctx := NewVMContext(vmCtxParams())
+		addr, err := vmctx.LegacyAddressForNewActor()
 
 		require.NoError(t, err)
 
-		params := &actor.FakeActorStorage{}
-		err = vmctx.CreateNewActor(addr, fakeActorCid, params)
+		err = vmctx.LegacyCreateNewActor(addr, fakeActorCid)
 		require.NoError(t, err)
 
 		act, err := tree.GetActor(ctx, addr)
 		require.NoError(t, err)
 
 		assert.Equal(t, fakeActorCid, act.Code)
-		actorStorage := vms.NewStorage(addr, act)
-		chunk, err := actorStorage.Get(act.Head)
-		require.NoError(t, err)
-
-		assert.True(t, len(chunk) > 0)
 	})
 
 }
 
-func TestVMContextIsAccountActor(t *testing.T) {
+func TestSendErrorHandling(t *testing.T) {
 	tf.UnitTest(t)
+	actor1 := actor.NewActor(types.CidFromString(t, "somecid"), types.NewAttoFILFromFIL(100))
+	actor2 := actor.NewActor(types.CidFromString(t, "somecid"), types.NewAttoFILFromFIL(50))
+	newMsg := types.NewMessageForTestGetter()
 
 	bs := blockstore.NewBlockstore(datastore.NewMapDatastore())
-	vms := NewStorageMap(bs)
+	vms := storagemap.NewStorageMap(bs)
 
-	accountActor, err := account.NewActor(types.NewAttoFILFromFIL(1000))
-	require.NoError(t, err)
-	vmCtxParams := NewContextParams{
-		From:       accountActor,
-		StorageMap: vms,
-		GasTracker: NewGasTracker(),
-	}
+	t.Run("returns exit code 1 and an unwrapped error if we fail to transfer value from one actor to another", func(t *testing.T) {
+		transferErr := xerrors.New("error")
 
-	ctx := NewVMContext(vmCtxParams)
-	assert.True(t, ctx.IsFromAccountActor())
+		msg := newMsg()
+		msg.Value = types.NewAttoFILFromFIL(1) // exact value doesn't matter - needs to be non-nil
 
-	nonAccountActor := actor.NewActor(types.NewCidForTestGetter()(), types.NewAttoFILFromFIL(1000))
-	vmCtxParams.From = nonAccountActor
-	ctx = NewVMContext(vmCtxParams)
-	assert.False(t, ctx.IsFromAccountActor())
+		transfer := func(_ *actor.Actor, _ *actor.Actor, _ types.AttoFIL) error {
+			return transferErr
+		}
+
+		tree := state.NewCachedTree(&state.MockStateTree{NoMocks: true})
+		vmCtxParams := NewContextParams{
+			From:        actor1,
+			To:          actor2,
+			Message:     msg,
+			State:       tree,
+			StorageMap:  vms,
+			GasTracker:  gastracker.NewGasTracker(),
+			BlockHeight: types.NewBlockHeight(0),
+		}
+		vmCtx := NewVMContext(vmCtxParams)
+		_, code, sendErr := send(context.Background(), transfer, vmCtx)
+
+		assert.Error(t, sendErr)
+		assert.Equal(t, 1, int(code))
+		assert.Equal(t, transferErr, sendErr)
+	})
+
+	t.Run("returns right exit code and a revert error if we can't load the recipient actor's code", func(t *testing.T) {
+		msg := newMsg()
+		msg.Value = types.ZeroAttoFIL // such that we don't transfer
+
+		stateTree := &state.MockStateTree{NoMocks: true, BuiltinActors: map[cid.Cid]dispatch.ExecutableActor{}}
+		tree := state.NewCachedTree(stateTree)
+		vmCtxParams := NewContextParams{
+			From:        actor1,
+			To:          actor2,
+			Message:     msg,
+			State:       tree,
+			StorageMap:  vms,
+			GasTracker:  gastracker.NewGasTracker(),
+			BlockHeight: types.NewBlockHeight(0),
+			Actors:      stateTree,
+		}
+		vmCtx := NewVMContext(vmCtxParams)
+		_, code, sendErr := send(context.Background(), Transfer, vmCtx)
+
+		assert.Error(t, sendErr)
+		assert.Equal(t, errors.ErrNoActorCode, int(code))
+		assert.True(t, errors.ShouldRevert(sendErr))
+	})
+
+	t.Run("returns exit code 1 and a revert error if code doesn't export a matching method", func(t *testing.T) {
+		msg := newMsg()
+		msg.Value = types.ZeroAttoFIL // such that we don't transfer
+		msg.Method = types.MethodID(125124)
+
+		stateTree := &state.MockStateTree{NoMocks: true, BuiltinActors: map[cid.Cid]dispatch.ExecutableActor{
+			actor2.Code: &actor.FakeActor{},
+		}}
+		tree := state.NewCachedTree(stateTree)
+
+		vmCtxParams := NewContextParams{
+			From:        actor1,
+			To:          actor2,
+			Message:     msg,
+			State:       tree,
+			StorageMap:  vms,
+			GasTracker:  gastracker.NewGasTracker(),
+			BlockHeight: types.NewBlockHeight(0),
+			Actors:      stateTree,
+		}
+		vmCtx := NewVMContext(vmCtxParams)
+		_, code, sendErr := send(context.Background(), Transfer, vmCtx)
+
+		assert.Error(t, sendErr)
+		assert.Equal(t, 1, int(code))
+		assert.True(t, errors.ShouldRevert(sendErr))
+	})
+}
+
+func TestTransfer(t *testing.T) {
+	tf.UnitTest(t)
+
+	actor1 := actor.NewActor(cid.Undef, types.NewAttoFILFromFIL(100))
+	actor2 := actor.NewActor(cid.Undef, types.NewAttoFILFromFIL(50))
+	actor3 := actor.NewActor(cid.Undef, types.ZeroAttoFIL)
+
+	t.Run("success", func(t *testing.T) {
+		assert.NoError(t, Transfer(actor1, actor2, types.NewAttoFILFromFIL(10)))
+		assert.Equal(t, actor1.Balance, types.NewAttoFILFromFIL(90))
+		assert.Equal(t, actor2.Balance, types.NewAttoFILFromFIL(60))
+
+		assert.NoError(t, Transfer(actor1, actor3, types.NewAttoFILFromFIL(20)))
+		assert.Equal(t, actor1.Balance, types.NewAttoFILFromFIL(70))
+		assert.Equal(t, actor3.Balance, types.NewAttoFILFromFIL(20))
+	})
+
+	t.Run("fail", func(t *testing.T) {
+		negval := types.NewAttoFILFromFIL(0).Sub(types.NewAttoFILFromFIL(1000))
+		assert.EqualError(t, Transfer(actor2, actor3, types.NewAttoFILFromFIL(1000)), "not enough balance")
+		assert.EqualError(t, Transfer(actor2, actor3, negval), "cannot transfer negative values")
+	})
 }

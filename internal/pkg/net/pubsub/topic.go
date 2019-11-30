@@ -7,9 +7,9 @@ import (
 	libp2p "github.com/libp2p/go-libp2p-pubsub"
 )
 
-// Subscriber subscribes to pubsub topics
-type Subscriber struct {
-	pubsub *libp2p.PubSub
+// Topic publishes and subscribes to a libp2p pubsub topic
+type Topic struct {
+	pubsubTopic *libp2p.Topic
 }
 
 // Message defines the common interface for go-filecoin message consumers.
@@ -35,15 +35,22 @@ type Subscription interface {
 	Cancel()
 }
 
-// NewSubscriber builds a new subscriber
-func NewSubscriber(sub *libp2p.PubSub) *Subscriber {
-	return &Subscriber{pubsub: sub}
+// NewTopic builds a new topic.
+func NewTopic(topic *libp2p.Topic) *Topic {
+	return &Topic{pubsubTopic: topic}
 }
 
 // Subscribe subscribes to a pubsub topic
-func (s *Subscriber) Subscribe(topic string) (Subscription, error) {
-	sub, e := s.pubsub.Subscribe(topic)
-	return &subscriptionWrapper{sub}, e
+func (t *Topic) Subscribe() (Subscription, error) {
+	sub, err := t.pubsubTopic.Subscribe()
+	return &subscriptionWrapper{sub}, err
+}
+
+// Publish publishes to a pubsub topic. It blocks until there is at least one
+// peer on the mesh that can receive the publish.
+func (t *Topic) Publish(ctx context.Context, data []byte) error {
+	//	return t.pubsubTopic.Publish(ctx, data)
+	return t.pubsubTopic.Publish(ctx, data, libp2p.WithReadiness(libp2p.MinTopicSize(1)))
 }
 
 // subscriptionWrapper extends a pubsub.Subscription in order to wrap the Message type.

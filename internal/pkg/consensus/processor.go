@@ -14,9 +14,11 @@ import (
 	"github.com/filecoin-project/go-filecoin/internal/pkg/metrics/tracing"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/types"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/abi"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/account"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/initactor"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/miner"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/address"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/errors"
@@ -29,7 +31,6 @@ var (
 
 	// Timers
 	amTimer = metrics.NewTimerMs("consensus/apply_message", "Duration of message application in milliseconds", msgMethodKey)
-	pbTimer = metrics.NewTimerMs("consensus/process_block", "Duration of block processing in milliseconds")
 )
 
 // MessageValidator validates the syntax and semantics of a message before it is applied.
@@ -55,14 +56,11 @@ type ApplicationResult struct {
 	ExecutionError error
 }
 
-// ProcessTipSetResponse records the results of successfully applied messages,
-// and the sets of successful and failed message cids.  Information of successes
-// and failures is key for helping match user messages with receipts in the case
-// of message conflicts.
-type ProcessTipSetResponse struct {
-	Results   []*ApplicationResult
-	Successes map[cid.Cid]struct{}
-	Failures  map[cid.Cid]struct{}
+// ApplyMessageResult is the result of applying a single message.
+type ApplyMessageResult struct {
+	ApplicationResult        // Application-level result, if error is nil.
+	Failure            error // Failure to apply the message
+	FailureIsPermanent bool  // Whether failure is permanent, has no chance of succeeding later.
 }
 
 // DefaultProcessor handles all block processing.
@@ -92,62 +90,6 @@ func NewConfiguredProcessor(validator MessageValidator, rewarder BlockRewarder, 
 	}
 }
 
-// ProcessBlock is the entrypoint for validating the state transitions
-// of the messages in a block. When we receive a new block from the
-// network ProcessBlock applies the block's messages to the beginning
-// state tree ensuring that all transitions are valid, accumulating
-// changes in the state tree, and returning the message receipts.
-//
-// ProcessBlock returns an error if the block contains a message, the
-// application of which would result in an invalid state transition (eg, a
-// message to transfer value from an unknown account). ProcessBlock
-// can return one of three kinds of errors (see ApplyMessage: fault
-// error, permanent error, temporary error). For the purposes of
-// block validation the caller probably doesn't care if the error
-// was temporary or permanent; either way the block has a bad
-// message and should be thrown out. Caller should always differentiate
-// a fault error as it signals something Very Bad has happened
-// (eg, disk corruption).
-//
-// To be clear about intent: if ProcessBlock returns an ApplyError
-// it is signaling that the message should not have been included
-// in the block. If no error is returned this means that the
-// message was applied, BUT SUCCESSFUL APPLICATION DOES NOT
-// NECESSARILY MEAN THE IMPLIED CALL SUCCEEDED OR SENDER INTENT
-// WAS REALIZED. It just means that the transition if any was
-// valid. For example, a message that errors out in the VM
-// will in many cases be successfully applied even though an
-// error was thrown causing any state changes to be rolled back.
-// See comments on ApplyMessage for specific intent.
-func (p *DefaultProcessor) ProcessBlock(ctx context.Context, st state.Tree, vms vm.StorageMap, blk *block.Block, blkMessages []*types.UnsignedMessage, ancestors []block.TipSet) (results []*ApplicationResult, err error) {
-	ctx, span := trace.StartSpan(ctx, "DefaultProcessor.ProcessBlock")
-	span.AddAttributes(trace.StringAttribute("block", blk.Cid().String()))
-	defer tracing.AddErrorEndSpan(ctx, span, &err)
-
-	pbsw := pbTimer.Start(ctx)
-	defer pbsw.Stop(ctx)
-
-	// find miner's owner address
-	minerOwnerAddr, err := p.minerOwnerAddress(ctx, st, vms, blk.Miner)
-	if err != nil {
-		return nil, err
-	}
-
-	bh := types.NewBlockHeight(uint64(blk.Height))
-	res, err := p.ApplyMessagesAndPayRewards(ctx, st, vms, blkMessages, minerOwnerAddr, bh, ancestors)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, r := range res {
-		if r.Failure != nil {
-			return nil, r.Failure
-		}
-		results = append(results, &r.ApplicationResult)
-	}
-	return results, nil
-}
-
 // ProcessTipSet computes the state transition specified by the messages in all
 // blocks in a TipSet.  It is similar to ProcessBlock with a few key differences.
 // Most importantly ProcessTipSet relies on the precondition that each input block
@@ -155,17 +97,12 @@ func (p *DefaultProcessor) ProcessBlock(ctx context.Context, st state.Tree, vms 
 // errors when applied to each block individually over the given state.
 // ProcessTipSet only returns errors in the case of faults.  Other errors
 // coming from calls to ApplyMessage can be traced to different blocks in the
-// TipSet containing conflicting messages and are ignored.  Blocks are applied
-// in the sorted order of their tickets.
-func (p *DefaultProcessor) ProcessTipSet(ctx context.Context, st state.Tree, vms vm.StorageMap, ts block.TipSet, tsMessages [][]*types.UnsignedMessage, ancestors []block.TipSet) (tsResult *ProcessTipSetResponse, err error) {
+// TipSet containing conflicting messages and are returned in the result slice.
+// Blocks are applied in the sorted order of their tickets.
+func (p *DefaultProcessor) ProcessTipSet(ctx context.Context, st state.Tree, vms vm.StorageMap, ts block.TipSet, tsMessages [][]*types.UnsignedMessage, ancestors []block.TipSet) (results []*ApplyMessageResult, err error) {
 	ctx, span := trace.StartSpan(ctx, "DefaultProcessor.ProcessTipSet")
 	span.AddAttributes(trace.StringAttribute("tipset", ts.String()))
 	defer tracing.AddErrorEndSpan(ctx, span, &err)
-
-	tsResult = &ProcessTipSetResponse{
-		Failures:  make(map[cid.Cid]struct{}),
-		Successes: make(map[cid.Cid]struct{}),
-	}
 
 	h, err := ts.Height()
 	if err != nil {
@@ -183,26 +120,13 @@ func (p *DefaultProcessor) ProcessTipSet(ctx context.Context, st state.Tree, vms
 		}
 
 		blkMessages := dedupedMessages[blkIdx]
-		results, err := p.ApplyMessagesAndPayRewards(ctx, st, vms, blkMessages, minerOwnerAddr, bh, ancestors)
+		blkResults, err := p.ApplyMessagesAndPayRewards(ctx, st, vms, blkMessages, minerOwnerAddr, bh, ancestors)
 		if err != nil {
 			return nil, err
 		}
 
-		for i, result := range results {
-			mCid, err := blkMessages[i].Cid()
-			if err != nil {
-				return nil, errors.FaultErrorWrap(err, "error getting message cid")
-			}
-			if result.Failure == nil {
-				tsResult.Results = append(tsResult.Results, &result.ApplicationResult)
-				tsResult.Successes[mCid] = struct{}{}
-			} else {
-				tsResult.Failures[mCid] = struct{}{}
-
-			}
-		}
+		results = append(results, blkResults...)
 	}
-
 	return
 }
 
@@ -226,12 +150,6 @@ func DeduppedMessages(tsMessages [][]*types.UnsignedMessage) ([][]*types.Unsigne
 		}
 	}
 	return allMessages, nil
-}
-
-// DeduppedUnwrappedMessages unwraps and removes all messages that have the same cid
-func DeduppedUnwrappedMessages(msgs [][]*types.SignedMessage) ([][]*types.UnsignedMessage, error) {
-	unwrapped := unwrap(msgs)
-	return DeduppedMessages(unwrapped)
 }
 
 // ApplyMessage attempts to apply a message to a state tree. It is the
@@ -315,7 +233,7 @@ func (p *DefaultProcessor) ApplyMessage(ctx context.Context, st state.Tree, vms 
 	amsw := amTimer.Start(ctx)
 	defer amsw.Stop(ctx)
 
-	cachedStateTree := state.NewCachedStateTree(st)
+	cachedStateTree := state.NewCachedTree(st)
 
 	r, err := p.attemptApplyMessage(ctx, cachedStateTree, vms, msg, bh, gasTracker, ancestors)
 	if err == nil {
@@ -387,13 +305,8 @@ var (
 // not make any changes to the state/blockchain and is useful for interrogating
 // actor state. Block height bh is optional; some methods will ignore it.
 func (p *DefaultProcessor) CallQueryMethod(ctx context.Context, st state.Tree, vms vm.StorageMap, to address.Address, method types.MethodID, params []byte, from address.Address, optBh *types.BlockHeight) ([][]byte, uint8, error) {
-	toActor, err := st.GetActor(ctx, to)
-	if err != nil {
-		return nil, 1, errors.ApplyErrorPermanentWrapf(err, "failed to get To actor")
-	}
-
 	// not committing or flushing storage structures guarantees changes won't make it to stored state tree or datastore
-	cachedSt := state.NewCachedStateTree(st)
+	cachedSt := state.NewCachedTree(st)
 
 	msg := &types.UnsignedMessage{
 		From:       from,
@@ -408,9 +321,22 @@ func (p *DefaultProcessor) CallQueryMethod(ctx context.Context, st state.Tree, v
 	gasTracker := vm.NewGasTracker()
 	gasTracker.MsgGasLimit = types.BlockGasLimit
 
+	// translate address before retrieving from actor
+	toAddr, err := p.resolveAddress(ctx, msg, cachedSt, vms, gasTracker)
+	if err != nil {
+		return nil, 1, errors.FaultErrorWrapf(err, "Could not resolve actor address")
+	}
+
+	toActor, err := st.GetActor(ctx, toAddr)
+	if err != nil {
+		return nil, 1, errors.ApplyErrorPermanentWrapf(err, "failed to get To actor")
+	}
+
 	vmCtxParams := vm.NewContextParams{
 		To:          toActor,
+		ToAddr:      toAddr,
 		Message:     msg,
+		OriginMsg:   msg,
 		State:       cachedSt,
 		StorageMap:  vms,
 		GasTracker:  gasTracker,
@@ -426,13 +352,8 @@ func (p *DefaultProcessor) CallQueryMethod(ctx context.Context, st state.Tree, v
 // PreviewQueryMethod estimates the amount of gas that will be used by a method
 // call. It accepts all the same arguments as CallQueryMethod.
 func (p *DefaultProcessor) PreviewQueryMethod(ctx context.Context, st state.Tree, vms vm.StorageMap, to address.Address, method types.MethodID, params []byte, from address.Address, optBh *types.BlockHeight) (types.GasUnits, error) {
-	toActor, err := st.GetActor(ctx, to)
-	if err != nil {
-		return types.NewGasUnits(0), errors.ApplyErrorPermanentWrapf(err, "failed to get To actor")
-	}
-
 	// not committing or flushing storage structures guarantees changes won't make it to stored state tree or datastore
-	cachedSt := state.NewCachedStateTree(st)
+	cachedSt := state.NewCachedTree(st)
 
 	msg := &types.UnsignedMessage{
 		From:       from,
@@ -447,9 +368,22 @@ func (p *DefaultProcessor) PreviewQueryMethod(ctx context.Context, st state.Tree
 	gasTracker := vm.NewGasTracker()
 	gasTracker.MsgGasLimit = types.BlockGasLimit
 
+	// translate address before retrieving from actor
+	toAddr, err := p.resolveAddress(ctx, msg, cachedSt, vms, gasTracker)
+	if err != nil {
+		return types.NewGasUnits(0), errors.FaultErrorWrapf(err, "Could not resolve actor address")
+	}
+
+	toActor, err := st.GetActor(ctx, toAddr)
+	if err != nil {
+		return types.NewGasUnits(0), errors.ApplyErrorPermanentWrapf(err, "failed to get To actor")
+	}
+
 	vmCtxParams := vm.NewContextParams{
 		To:          toActor,
+		ToAddr:      toAddr,
 		Message:     msg,
+		OriginMsg:   msg,
 		State:       cachedSt,
 		StorageMap:  vms,
 		GasTracker:  gasTracker,
@@ -502,7 +436,13 @@ func (p *DefaultProcessor) attemptApplyMessage(ctx context.Context, st *state.Ca
 		}
 	}
 
-	toActor, err := st.GetOrCreateActor(ctx, msg.To, func() (*actor.Actor, error) {
+	// translate address before retrieving from actor
+	toAddr, err := p.resolveAddress(ctx, msg, st, store, gasTracker)
+	if err != nil {
+		return nil, errors.FaultErrorWrapf(err, "Could not resolve actor address")
+	}
+
+	toActor, err := st.GetOrCreateActor(ctx, toAddr, func() (*actor.Actor, error) {
 		// Addresses are deterministic so sending a message to a non-existent address must not install an actor,
 		// else actors could be installed ahead of address activation. So here we create the empty, upgradable
 		// actor to collect any balance that may be transferred.
@@ -515,7 +455,9 @@ func (p *DefaultProcessor) attemptApplyMessage(ctx context.Context, st *state.Ca
 	vmCtxParams := vm.NewContextParams{
 		From:        fromActor,
 		To:          toActor,
+		ToAddr:      toAddr,
 		Message:     msg,
+		OriginMsg:   msg,
 		State:       st,
 		StorageMap:  store,
 		GasTracker:  gasTracker,
@@ -543,11 +485,42 @@ func (p *DefaultProcessor) attemptApplyMessage(ctx context.Context, st *state.Ca
 	return receipt, vmErr
 }
 
-// ApplyMessageResult is the result of applying a single message.
-type ApplyMessageResult struct {
-	ApplicationResult        // Application-level result, if error is nil.
-	Failure            error // Failure to apply the message
-	FailureIsPermanent bool  // Whether failure is permanent, has no chance of succeeding later.
+// resolveAddress looks up associated id address if actor address. Otherwise it returns the same address.
+func (p *DefaultProcessor) resolveAddress(ctx context.Context, msg *types.UnsignedMessage, st *state.CachedTree, vms vm.StorageMap, gt *vm.GasTracker) (address.Address, error) {
+	if msg.To.Protocol() != address.Actor {
+		return msg.To, nil
+	}
+
+	to, err := st.GetActor(ctx, address.InitAddress)
+	if err != nil {
+		return address.Undef, err
+	}
+
+	vmCtxParams := vm.NewContextParams{
+		Message:    msg,
+		State:      st,
+		StorageMap: vms,
+		GasTracker: gt,
+		Actors:     p.actors,
+		To:         to,
+	}
+	vmCtx := vm.NewVMContext(vmCtxParams)
+	ret, _, err := vmCtx.Send(address.InitAddress, initactor.GetActorIDForAddress, types.ZeroAttoFIL, []interface{}{msg.To})
+	if err != nil {
+		return address.Undef, err
+	}
+
+	id, err := abi.Deserialize(ret[0], abi.Integer)
+	if err != nil {
+		return address.Undef, err
+	}
+
+	idAddr, err := address.NewIDAddress(id.Val.(*big.Int).Uint64())
+	if err != nil {
+		return address.Undef, err
+	}
+
+	return idAddr, nil
 }
 
 // ApplyMessagesAndPayRewards pays the block mining reward to the miner's owner and then applies
@@ -595,7 +568,7 @@ var _ BlockRewarder = (*DefaultBlockRewarder)(nil)
 
 // BlockReward transfers the block reward from the network actor to the miner's owner.
 func (br *DefaultBlockRewarder) BlockReward(ctx context.Context, st state.Tree, minerOwnerAddr address.Address) error {
-	cachedTree := state.NewCachedStateTree(st)
+	cachedTree := state.NewCachedTree(st)
 	if err := rewardTransfer(ctx, address.NetworkAddress, minerOwnerAddr, br.BlockRewardAmount(), cachedTree); err != nil {
 		return errors.FaultErrorWrap(err, "Error attempting to pay block reward")
 	}
@@ -604,7 +577,7 @@ func (br *DefaultBlockRewarder) BlockReward(ctx context.Context, st state.Tree, 
 
 // GasReward transfers the gas cost reward from the sender actor to the minerOwnerAddr
 func (br *DefaultBlockRewarder) GasReward(ctx context.Context, st state.Tree, minerOwnerAddr address.Address, msg *types.UnsignedMessage, cost types.AttoFIL) error {
-	cachedTree := state.NewCachedStateTree(st)
+	cachedTree := state.NewCachedTree(st)
 	if err := rewardTransfer(ctx, msg.From, minerOwnerAddr, cost, cachedTree); err != nil {
 		return errors.FaultErrorWrap(err, "Error attempting to pay gas reward")
 	}

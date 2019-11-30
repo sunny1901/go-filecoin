@@ -31,12 +31,20 @@ var GenesisKey = datastore.NewKey("/consensus/genesisCid")
 
 var logStore = logging.Logger("chain.store")
 
-var headKey = datastore.NewKey("/chain/heaviestTipSet")
+// HeadKey is the key at which the head tipset cid's are written in the datastore.
+var HeadKey = datastore.NewKey("/chain/heaviestTipSet")
+
+// ipldStore defines an interface for interacting with a hamt.CborIpldStore.
+// TODO #3078 use go-ipld-cbor export
+type ipldStore interface {
+	Put(ctx context.Context, v interface{}) (cid.Cid, error)
+	Get(ctx context.Context, c cid.Cid, out interface{}) error
+}
 
 type ipldSource struct {
 	// cst is a store allowing access
 	// (un)marshalling and interop with go-ipld-hamt.
-	cborStore state.IpldStore
+	cborStore ipldStore
 }
 
 type tsState struct {
@@ -44,7 +52,7 @@ type tsState struct {
 	Reciepts  cid.Cid
 }
 
-func newSource(cst state.IpldStore) *ipldSource {
+func newSource(cst ipldStore) *ipldSource {
 	return &ipldSource{
 		cborStore: cst,
 	}
@@ -100,7 +108,7 @@ type Store struct {
 }
 
 // NewStore constructs a new default store.
-func NewStore(ds repo.Datastore, cst state.IpldStore, stl state.TreeLoader, sr Reporter, genesisCid cid.Cid) *Store {
+func NewStore(ds repo.Datastore, cst ipldStore, stl state.TreeLoader, sr Reporter, genesisCid cid.Cid) *Store {
 	return &Store{
 		stateAndBlockSource: newSource(cst),
 		stateTreeLoader:     stl,
@@ -121,8 +129,8 @@ func NewStore(ds repo.Datastore, cst state.IpldStore, stl state.TreeLoader, sr R
 // tipset were only Put to the Store after checking for valid transitions.
 //
 // Furthermore Load trusts that the Store's backing datastore correctly
-// preserves the cids of the heaviest tipset under the "headKey" datastore key.
-// If the headKey cids are tampered with and invalid blocks added to the datastore
+// preserves the cids of the heaviest tipset under the "HeadKey" datastore key.
+// If the HeadKey cids are tampered with and invalid blocks added to the datastore
 // then Load could be tricked into loading an invalid chain. Load will error if the
 // head does not link back to the expected genesis block, or the Store's
 // datastore does not store a link in the chain.  In case of error the caller
@@ -197,9 +205,9 @@ func (store *Store) Load(ctx context.Context) (err error) {
 // loadHead loads the latest known head from disk.
 func (store *Store) loadHead() (block.TipSetKey, error) {
 	var emptyCidSet block.TipSetKey
-	bb, err := store.ds.Get(headKey)
+	bb, err := store.ds.Get(HeadKey)
 	if err != nil {
-		return emptyCidSet, errors.Wrap(err, "failed to read headKey")
+		return emptyCidSet, errors.Wrap(err, "failed to read HeadKey")
 	}
 
 	var cids block.TipSetKey
@@ -353,7 +361,7 @@ func (store *Store) writeHead(ctx context.Context, cids block.TipSetKey) error {
 		return err
 	}
 
-	return store.ds.Put(headKey, val)
+	return store.ds.Put(HeadKey, val)
 }
 
 // writeTipSetMetadata writes the tipset key and the state root id to the

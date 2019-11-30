@@ -2,14 +2,15 @@ package consensus
 
 import (
 	"context"
+	"time"
 
 	"github.com/filecoin-project/go-amt-ipld"
 	"github.com/filecoin-project/go-bls-sigs"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/block"
 	"github.com/ipfs/go-hamt-ipld"
-	"github.com/ipfs/go-ipfs-blockstore"
+	blockstore "github.com/ipfs/go-ipfs-blockstore"
 	"github.com/libp2p/go-libp2p-core/peer"
-	"github.com/whyrusleeping/cbor-gen"
+	typegen "github.com/whyrusleeping/cbor-gen"
 
 	"github.com/filecoin-project/go-filecoin/internal/pkg/types"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm"
@@ -18,6 +19,7 @@ import (
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/initactor"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/miner"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/paymentbroker"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/power"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/storagemarket"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/address"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/state"
@@ -46,12 +48,13 @@ type minerActorConfig struct {
 
 // Config is used to configure values in the GenesisInitFunction.
 type Config struct {
-	accounts   map[address.Address]types.AttoFIL
-	nonces     map[address.Address]uint64
-	actors     map[address.Address]*actor.Actor
-	miners     map[address.Address]*minerActorConfig
-	network    string
-	proofsMode types.ProofsMode
+	accounts         map[address.Address]types.AttoFIL
+	nonces           map[address.Address]uint64
+	actors           map[address.Address]*actor.Actor
+	miners           map[address.Address]*minerActorConfig
+	network          string
+	proofsMode       types.ProofsMode
+	genesisTimestamp time.Time
 }
 
 // GenOption is a configuration option for the GenesisInitFunction.
@@ -118,15 +121,26 @@ func ProofsMode(proofsMode types.ProofsMode) GenOption {
 	}
 }
 
+// GenesisTime sets the timestamp in the genesis block.
+func GenesisTime(genesisTimestamp time.Time) GenOption {
+	return func(gc *Config) error {
+		gc.genesisTimestamp = genesisTimestamp
+		return nil
+	}
+}
+
+var defaultGenesisTimestamp = time.Unix(123456789, 0)
+
 // NewEmptyConfig inits and returns an empty config
 func NewEmptyConfig() *Config {
 	return &Config{
-		accounts:   make(map[address.Address]types.AttoFIL),
-		nonces:     make(map[address.Address]uint64),
-		actors:     make(map[address.Address]*actor.Actor),
-		miners:     make(map[address.Address]*minerActorConfig),
-		network:    "localnet",
-		proofsMode: types.TestProofsMode,
+		accounts:         make(map[address.Address]types.AttoFIL),
+		nonces:           make(map[address.Address]uint64),
+		actors:           make(map[address.Address]*actor.Actor),
+		miners:           make(map[address.Address]*minerActorConfig),
+		network:          "localnet",
+		proofsMode:       types.TestProofsMode,
+		genesisTimestamp: defaultGenesisTimestamp,
 	}
 }
 
@@ -134,7 +148,7 @@ func NewEmptyConfig() *Config {
 func MakeGenesisFunc(opts ...GenOption) GenesisInitFunc {
 	return func(cst *hamt.CborIpldStore, bs blockstore.Blockstore) (*block.Block, error) {
 		ctx := context.Background()
-		st := state.NewEmptyStateTree(cst)
+		st := state.NewTree(cst)
 		storageMap := vm.NewStorageMap(bs)
 
 		genCfg := NewEmptyConfig()
@@ -213,6 +227,7 @@ func MakeGenesisFunc(opts ...GenOption) GenesisInitFunc {
 			MessageReceipts: emptyAMTCid,
 			BLSAggregateSig: emptyBLSSignature[:],
 			Ticket:          block.Ticket{VRFProof: []byte{0xec}},
+			Timestamp:       types.Uint64(genCfg.genesisTimestamp.Unix()),
 		}
 
 		if _, err := cst.Put(ctx, genesis); err != nil {
@@ -256,6 +271,16 @@ func SetupDefaultActors(ctx context.Context, st state.Tree, storageMap vm.Storag
 		return err
 	}
 	if err = st.SetActor(ctx, address.PaymentBrokerAddress, pbAct); err != nil {
+		return err
+	}
+
+	powAct := power.NewActor()
+	err = (&power.Actor{}).InitializeState(storageMap.NewStorage(address.PowerAddress, powAct), nil)
+	if err != nil {
+		return err
+	}
+	err = st.SetActor(ctx, address.PowerAddress, powAct)
+	if err != nil {
 		return err
 	}
 

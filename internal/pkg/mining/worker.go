@@ -10,13 +10,14 @@ import (
 
 	"github.com/filecoin-project/go-filecoin/internal/pkg/block"
 	"github.com/ipfs/go-cid"
-	"github.com/ipfs/go-ipfs-blockstore"
+	blockstore "github.com/ipfs/go-ipfs-blockstore"
 	logging "github.com/ipfs/go-log"
 	"github.com/pkg/errors"
 
 	"github.com/filecoin-project/go-filecoin/internal/pkg/chain"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/clock"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/consensus"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/sampling"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/types"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/address"
@@ -81,9 +82,14 @@ type electionUtil interface {
 	IsElectionWinner(context.Context, consensus.PowerTableView, block.Ticket, uint64, block.VRFPi, address.Address, address.Address) (bool, error)
 }
 
-// ticketGenerator creates and finalizes tickets.
+// ticketGenerator creates tickets.
 type ticketGenerator interface {
 	NextTicket(block.Ticket, address.Address, types.Signer) (block.Ticket, error)
+}
+
+type tipSetMetadata interface {
+	GetTipSetStateRoot(key block.TipSetKey) (cid.Cid, error)
+	GetTipSetReceiptsRoot(key block.TipSetKey) (cid.Cid, error)
 }
 
 // DefaultWorker runs a mining job.
@@ -95,6 +101,7 @@ type DefaultWorker struct {
 	workerSigner   types.Signer
 
 	// consensus things
+	tsMetadata   tipSetMetadata
 	getStateTree GetStateTree
 	getWeight    GetWeight
 	getAncestors GetAncestors
@@ -118,11 +125,12 @@ type WorkerParameters struct {
 	WorkerSigner   types.Signer
 
 	// consensus things
-	GetStateTree GetStateTree
-	GetWeight    GetWeight
-	GetAncestors GetAncestors
-	Election     electionUtil
-	TicketGen    ticketGenerator
+	TipSetMetadata tipSetMetadata
+	GetStateTree   GetStateTree
+	GetWeight      GetWeight
+	GetAncestors   GetAncestors
+	Election       electionUtil
+	TicketGen      ticketGenerator
 
 	// core filecoin things
 	MessageSource MessageSource
@@ -148,6 +156,7 @@ func NewDefaultWorker(parameters WorkerParameters) *DefaultWorker {
 		workerSigner:   parameters.WorkerSigner,
 		election:       parameters.Election,
 		ticketGen:      parameters.TicketGen,
+		tsMetadata:     parameters.TipSetMetadata,
 		clock:          parameters.Clock,
 	}
 }
@@ -175,7 +184,7 @@ func (w *DefaultWorker) Mine(ctx context.Context, base block.TipSet, nullBlkCoun
 		return
 	}
 
-	// Create the next ticket.
+	// lookback consensus.ElectionLookback
 	prevTicket, err := base.MinTicket()
 	if err != nil {
 		log.Warnf("Worker.Mine couldn't read parent ticket %s", err)
@@ -206,8 +215,28 @@ func (w *DefaultWorker) Mine(ctx context.Context, base block.TipSet, nullBlkCoun
 	case <-done:
 	}
 
+	// lookback consensus.ElectionLookback for the election ticket
+	baseHeight, err := base.Height()
+	if err != nil {
+		log.Warnf("Worker.Mine couldn't read base height %s", err)
+		outCh <- Output{Err: err}
+		return
+	}
+	ancestors, err := w.getAncestors(ctx, base, types.NewBlockHeight(baseHeight+nullBlkCount+1))
+	if err != nil {
+		log.Warnf("Worker.Mine couldn't get ancestorst %s", err)
+		outCh <- Output{Err: err}
+		return
+	}
+	electionTicket, err := sampling.SampleNthTicket(consensus.ElectionLookback-1, ancestors)
+	if err != nil {
+		log.Warnf("Worker.Mine couldn't read parent ticket %s", err)
+		outCh <- Output{Err: err}
+		return
+	}
+
 	// Run an election to check if this miner has won the right to mine
-	electionProof, err := w.election.RunElection(prevTicket, workerAddr, w.workerSigner, nullBlkCount)
+	electionProof, err := w.election.RunElection(electionTicket, workerAddr, w.workerSigner, nullBlkCount)
 	if err != nil {
 		log.Errorf("failed to run local election: %s", err)
 		outCh <- Output{Err: err}
@@ -219,7 +248,7 @@ func (w *DefaultWorker) Mine(ctx context.Context, base block.TipSet, nullBlkCoun
 		outCh <- Output{Err: err}
 		return
 	}
-	weHaveAWinner, err := w.election.IsElectionWinner(ctx, powerTable, prevTicket, nullBlkCount, electionProof, workerAddr, w.minerAddr)
+	weHaveAWinner, err := w.election.IsElectionWinner(ctx, powerTable, electionTicket, nullBlkCount, electionProof, workerAddr, w.minerAddr)
 	if err != nil {
 		log.Errorf("Worker.Mine couldn't run election: %s", err.Error())
 		outCh <- Output{Err: err}
@@ -236,7 +265,6 @@ func (w *DefaultWorker) Mine(ctx context.Context, base block.TipSet, nullBlkCoun
 		won = true
 		return
 	}
-
 	return
 }
 

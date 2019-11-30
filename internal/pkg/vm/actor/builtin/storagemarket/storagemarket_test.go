@@ -11,13 +11,13 @@ import (
 	th "github.com/filecoin-project/go-filecoin/internal/pkg/testhelpers"
 	tf "github.com/filecoin-project/go-filecoin/internal/pkg/testhelpers/testflags"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/types"
-	"github.com/filecoin-project/go-filecoin/internal/pkg/vm"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/abi"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/miner"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/storagemarket"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/address"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/internal/storagemap"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/state"
 
 	"github.com/stretchr/testify/assert"
@@ -42,7 +42,9 @@ func TestStorageMarketCreateStorageMiner(t *testing.T) {
 	outAddr, err := address.NewFromBytes(result.Receipt.Return[0])
 	require.NoError(t, err)
 
-	minerActor, err := st.GetActor(ctx, outAddr)
+	minerAddr := th.RequireActorIDAddress(ctx, t, st, vms, outAddr)
+
+	minerActor, err := st.GetActor(ctx, minerAddr)
 	require.NoError(t, err)
 
 	storageMkt, err := st.GetActor(ctx, address.StorageMarketAddress)
@@ -52,7 +54,7 @@ func TestStorageMarketCreateStorageMiner(t *testing.T) {
 	assert.Equal(t, types.NewAttoFILFromFIL(100), minerActor.Balance)
 
 	var mstor miner.State
-	builtin.RequireReadState(t, vms, outAddr, minerActor, &mstor)
+	builtin.RequireReadState(t, vms, minerAddr, minerActor, &mstor)
 
 	assert.Equal(t, mstor.ActiveCollateral, types.NewAttoFILFromFIL(0))
 	assert.Equal(t, mstor.PeerID, pid)
@@ -67,7 +69,7 @@ func TestStorageMarketCreateStorageMinerDoesNotOverwriteActorBalance(t *testing.
 	st, vms := th.RequireCreateStorages(ctx, t)
 
 	// create account of future miner actor by sending FIL to the predicted address
-	minerAddr, err := deriveMinerAddress(address.TestAddress, 0)
+	minerAddr, err := address.NewIDAddress(100) // 100 is the first address of a constructed actor
 	require.NoError(t, err)
 
 	msg := types.NewUnsignedMessage(address.TestAddress2, minerAddr, 0, types.NewAttoFILFromFIL(100), types.SendMethodID, []byte{})
@@ -83,9 +85,10 @@ func TestStorageMarketCreateStorageMinerDoesNotOverwriteActorBalance(t *testing.
 	require.NoError(t, result.ExecutionError)
 
 	// ensure our derived address is the address storage market creates
+	derivedAddr, err := deriveMinerAddress(address.TestAddress, 0)
 	createdAddress, err := address.NewFromBytes(result.Receipt.Return[0])
 	require.NoError(t, err)
-	assert.Equal(t, minerAddr, createdAddress)
+	assert.Equal(t, derivedAddr, createdAddress)
 	miner, err := st.GetActor(ctx, minerAddr)
 	require.NoError(t, err)
 
@@ -167,8 +170,10 @@ func TestStorageMarketGetLateMiners(t *testing.T) {
 
 		// create 3 bootstrap miners by passing in 0 block height, so that VerifyProof is skipped
 		// Otherwise this test will fail
-		addr1 := th.CreateTestMiner(t, st, vms, address.TestAddress, th.RequireRandomPeerID(t))
-		addr2 := th.CreateTestMiner(t, st, vms, address.TestAddress, th.RequireRandomPeerID(t))
+		outAddr1 := th.CreateTestMiner(t, st, vms, address.TestAddress, th.RequireRandomPeerID(t))
+		addr1 := th.RequireActorIDAddress(ctx, t, st, vms, outAddr1)
+		outAddr2 := th.CreateTestMiner(t, st, vms, address.TestAddress, th.RequireRandomPeerID(t))
+		addr2 := th.RequireActorIDAddress(ctx, t, st, vms, outAddr2)
 		_ = th.CreateTestMiner(t, st, vms, address.TestAddress, th.RequireRandomPeerID(t))
 
 		// 2 of the 3 miners make a commitment
@@ -208,7 +213,7 @@ func TestStorageMarketGetLateMiners(t *testing.T) {
 	})
 }
 
-func requireMakeCommitment(t *testing.T, st state.Tree, vms vm.StorageMap, minerAddr address.Address, blockHeight int, sectorID uint64) {
+func requireMakeCommitment(t *testing.T, st state.Tree, vms storagemap.StorageMap, minerAddr address.Address, blockHeight int, sectorID uint64) {
 	builder := chain.NewBuilder(t, address.Undef)
 	head := builder.AppendManyOn(blockHeight, block.UndefTipSet)
 	ancestors := builder.RequireTipSets(head.Key(), blockHeight)
@@ -226,7 +231,8 @@ func TestUpdateStorage(t *testing.T) {
 		st, vms := th.RequireCreateStorages(ctx, t)
 		// Create miner so that update can pass checks
 		pid := th.RequireRandomPeerID(t)
-		minerAddr := th.CreateTestMiner(t, st, vms, address.TestAddress, pid)
+		outAddr := th.CreateTestMiner(t, st, vms, address.TestAddress, pid)
+		minerAddr := th.RequireActorIDAddress(ctx, t, st, vms, outAddr)
 
 		// Add update to total storage
 		update := types.NewBytesAmount(uint64(3000000))
@@ -269,7 +275,8 @@ func TestUpdateStorage(t *testing.T) {
 		st, vms := th.RequireCreateStorages(ctx, t)
 		// Create miner so that update can pass checks
 		pid := th.RequireRandomPeerID(t)
-		minerAddr := th.CreateTestMiner(t, st, vms, address.TestAddress, pid)
+		outAddr := th.CreateTestMiner(t, st, vms, address.TestAddress, pid)
+		minerAddr := th.RequireActorIDAddress(ctx, t, st, vms, outAddr)
 
 		// Add plus (positive number) and minus (negative number) to total storage
 		plus := types.NewBytesAmount(uint64(3000000))
@@ -352,7 +359,7 @@ func deriveMinerAddress(creator address.Address, nonce uint64) (address.Address,
 
 // assertGetLateMiners calls GetLateMiners message / method, deserializes the result and returns
 // a map of the late miners with their late states
-func assertGetLateMiners(t *testing.T, st state.Tree, vms vm.StorageMap, height uint64) *map[string]uint64 {
+func assertGetLateMiners(t *testing.T, st state.Tree, vms storagemap.StorageMap, height uint64) *map[string]uint64 {
 	res, err := th.CreateAndApplyTestMessage(t, st, vms, address.StorageMarketAddress, 0, height, storagemarket.GetLateMiners, nil)
 	require.NoError(t, err)
 	require.NoError(t, res.ExecutionError)

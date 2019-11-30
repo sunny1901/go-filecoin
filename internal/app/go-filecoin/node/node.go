@@ -26,7 +26,6 @@ import (
 	"github.com/filecoin-project/go-filecoin/internal/pkg/message"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/metrics"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/mining"
-	"github.com/filecoin-project/go-filecoin/internal/pkg/net"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/net/pubsub"
 	mining_protocol "github.com/filecoin-project/go-filecoin/internal/pkg/protocol/mining"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/protocol/retrieval"
@@ -142,7 +141,7 @@ func (node *Node) Start(ctx context.Context) error {
 	if !node.OfflineMode {
 
 		// Subscribe to block pubsub topic to learn about new chain heads.
-		node.syncer.BlockSub, err = node.pubsubscribe(syncCtx, net.BlockTopic(node.network.NetworkName), node.processBlock)
+		node.syncer.BlockSub, err = node.pubsubscribe(syncCtx, node.syncer.BlockTopic, node.processBlock)
 		if err != nil {
 			log.Error(err)
 		}
@@ -152,7 +151,7 @@ func (node *Node) Start(ctx context.Context) error {
 		// https://github.com/filecoin-project/go-filecoin/issues/2145.
 		// This is blocked by https://github.com/filecoin-project/go-filecoin/issues/2959, which
 		// is necessary for message_propagate_test to start mining before testing this behaviour.
-		node.Messaging.MessageSub, err = node.pubsubscribe(syncCtx, net.MessageTopic(node.network.NetworkName), node.processMessage)
+		node.Messaging.MessageSub, err = node.pubsubscribe(syncCtx, node.Messaging.MessageTopic, node.processMessage)
 		if err != nil {
 			return err
 		}
@@ -166,17 +165,19 @@ func (node *Node) Start(ctx context.Context) error {
 			return err
 		}
 
-		node.syncer.Start(syncCtx, node)
+		if err := node.syncer.Start(syncCtx, node); err != nil {
+			return err
+		}
 	}
 
 	return nil
 }
 
 // Subscribes a handler function to a pubsub topic.
-func (node *Node) pubsubscribe(ctx context.Context, topic string, handler pubSubHandler) (pubsub.Subscription, error) {
-	sub, err := node.PorcelainAPI.PubSubSubscribe(topic)
+func (node *Node) pubsubscribe(ctx context.Context, topic *pubsub.Topic, handler pubSubHandler) (pubsub.Subscription, error) {
+	sub, err := topic.Subscribe()
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to subscribe to %s", topic)
+		return nil, errors.Wrapf(err, "failed to subscribe")
 	}
 	go node.handleSubscription(ctx, sub, handler)
 	return sub, nil
@@ -371,7 +372,7 @@ func (node *Node) SetupMining(ctx context.Context) error {
 	if err != nil {
 		return errors.Wrap(err, "failed to get mining address")
 	}
-	_, err = node.PorcelainAPI.ActorGet(ctx, minerAddr)
+	_, err = node.PorcelainAPI.ActorGetStable(ctx, minerAddr)
 	if err != nil {
 		return errors.Wrap(err, "failed to get miner actor")
 	}
@@ -411,7 +412,7 @@ func (node *Node) StartMining(ctx context.Context) error {
 
 	err := node.SetupMining(ctx)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "failed to setup mining")
 	}
 
 	minerAddr, err := node.MiningAddress()
@@ -468,7 +469,7 @@ func (node *Node) StartMining(ctx context.Context) error {
 
 					// This call can fail due to, e.g. nonce collisions. Our miners existence depends on this.
 					// We should deal with this, but MessageSendWithRetry is problematic.
-					msgCid, err := node.PorcelainAPI.MessageSend(
+					msgCid, _, err := node.PorcelainAPI.MessageSend(
 						miningCtx,
 						workerAddr,
 						minerAddr,
@@ -559,7 +560,6 @@ func initSectorBuilderForNode(ctx context.Context, node *Node) (sectorbuilder.Se
 		return nil, err
 	}
 	cfg := sectorbuilder.RustSectorBuilderConfig{
-		BlockService:     node.Blockservice.Blockservice,
 		LastUsedSectorID: lastUsedSectorID,
 		MetadataDir:      stagingDir,
 		MinerAddr:        minerAddr,
@@ -704,11 +704,12 @@ func (node *Node) CreateMiningWorker(ctx context.Context) (mining.Worker, error)
 		MinerOwnerAddr: minerOwnerAddr,
 		WorkerSigner:   node.Wallet.Wallet,
 
-		GetStateTree: node.getStateTree,
-		GetWeight:    node.getWeight,
-		GetAncestors: node.getAncestors,
-		Election:     consensus.ElectionMachine{},
-		TicketGen:    consensus.TicketMachine{},
+		GetStateTree:   node.getStateTree,
+		GetWeight:      node.getWeight,
+		GetAncestors:   node.getAncestors,
+		Election:       consensus.ElectionMachine{},
+		TicketGen:      consensus.TicketMachine{},
+		TipSetMetadata: node.chain.ChainReader,
 
 		MessageSource: node.Messaging.Inbox.Pool(),
 		MessageStore:  node.chain.MessageStore,
@@ -742,7 +743,7 @@ func (node *Node) getWeight(ctx context.Context, ts block.TipSet) (uint64, error
 
 // getAncestors is the default GetAncestors function for the mining worker.
 func (node *Node) getAncestors(ctx context.Context, ts block.TipSet, newBlockHeight *types.BlockHeight) ([]block.TipSet, error) {
-	ancestorHeight := newBlockHeight.Sub(types.NewBlockHeight(consensus.AncestorRoundsNeeded))
+	ancestorHeight := newBlockHeight.Sub(types.NewBlockHeight(uint64(consensus.AncestorRoundsNeeded)))
 	return chain.GetRecentAncestors(ctx, ts, node.chain.ChainReader, ancestorHeight)
 }
 

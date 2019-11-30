@@ -7,11 +7,10 @@ import (
 
 	"github.com/filecoin-project/go-filecoin/internal/pkg/block"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/chainsync/status"
-	"github.com/filecoin-project/go-filecoin/internal/pkg/vm2/external"
-	"github.com/ipfs/go-bitswap"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/vm"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/state"
 	"github.com/ipfs/go-cid"
 	"github.com/ipfs/go-datastore/query"
-	exchange "github.com/ipfs/go-ipfs-exchange-interface"
 	ipld "github.com/ipfs/go-ipld-format"
 	logging "github.com/ipfs/go-log"
 	"github.com/libp2p/go-libp2p-core/metrics"
@@ -28,13 +27,11 @@ import (
 	"github.com/filecoin-project/go-filecoin/internal/pkg/consensus"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/message"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/net"
-	"github.com/filecoin-project/go-filecoin/internal/pkg/net/pubsub"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/protocol/storage/storagedeal"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/sectorbuilder"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/types"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/address"
-	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/state"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/wallet"
 )
 
@@ -46,7 +43,6 @@ import (
 type API struct {
 	logger logging.EventLogger
 
-	bitswap       exchange.Interface
 	chain         *cst.ChainStateReadWriter
 	syncer        *cst.ChainSyncProvider
 	config        *cfg.Config
@@ -65,7 +61,6 @@ type API struct {
 
 // APIDeps contains all the API's dependencies
 type APIDeps struct {
-	Bitswap       exchange.Interface
 	Chain         *cst.ChainStateReadWriter
 	ActState      *consensus.ActorStateStore
 	Sync          *cst.ChainSyncProvider
@@ -85,9 +80,7 @@ type APIDeps struct {
 // New constructs a new instance of the API.
 func New(deps *APIDeps) *API {
 	return &API{
-		logger: logging.Logger("porcelain"),
-
-		bitswap:       deps.Bitswap,
+		logger:        logging.Logger("porcelain"),
 		chain:         deps.Chain,
 		actorState:    deps.ActState,
 		syncer:        deps.Sync,
@@ -113,7 +106,7 @@ func (api *API) ActorGet(ctx context.Context, addr address.Address) (*actor.Acto
 // ActorGetSignature returns the signature of the given actor's given method.
 // The function signature is typically used to enable a caller to decode the
 // output of an actor method call (message).
-func (api *API) ActorGetSignature(ctx context.Context, actorAddr address.Address, method types.MethodID) (_ *external.FunctionSignature, err error) {
+func (api *API) ActorGetSignature(ctx context.Context, actorAddr address.Address, method types.MethodID) (_ *vm.FunctionSignature, err error) {
 	return api.chain.GetActorSignature(ctx, actorAddr, method)
 }
 
@@ -270,13 +263,15 @@ func (api *API) Snapshot(ctx context.Context, baseKey block.TipSetKey) (consensu
 // MessageSend sends a message. It uses the default from address if none is given and signs the
 // message using the wallet. This call "sends" in the sense that it enqueues the
 // message in the msg pool and broadcasts it to the network; it does not wait for the
-// message to go on chain. Note that no default from address is provided.
-func (api *API) MessageSend(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method types.MethodID, params ...interface{}) (cid.Cid, error) {
+// message to go on chain. Note that no default from address is provided.  The error
+// channel returned receives either nil or an error and is immediately closed after
+// the message is published to the network to signal that the publish is complete.
+func (api *API) MessageSend(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method types.MethodID, params ...interface{}) (cid.Cid, chan error, error) {
 	return api.outbox.Send(ctx, from, to, value, gasPrice, gasLimit, true, method, params...)
 }
 
 //SignedMessageSend sends a siged message.
-func (api *API) SignedMessageSend(ctx context.Context, smsg *types.SignedMessage) (cid.Cid, error) {
+func (api *API) SignedMessageSend(ctx context.Context, smsg *types.SignedMessage) (cid.Cid, chan error, error) {
 	return api.outbox.SignedSend(ctx, smsg, true)
 }
 
@@ -292,16 +287,6 @@ func (api *API) MessageFind(ctx context.Context, msgCid cid.Cid) (*msg.ChainMess
 // to appear on chain.
 func (api *API) MessageWait(ctx context.Context, msgCid cid.Cid, cb func(*block.Block, *types.SignedMessage, *types.MessageReceipt) error) error {
 	return api.msgWaiter.Wait(ctx, msgCid, cb)
-}
-
-// PubSubSubscribe subscribes to a topic for notifications from the filecoin network
-func (api *API) PubSubSubscribe(topic string) (pubsub.Subscription, error) {
-	return api.network.Subscribe(topic)
-}
-
-// PubSubPublish publishes a message to a topic on the filecoin network
-func (api *API) PubSubPublish(topic string, data []byte) error {
-	return api.network.Publish(topic, data)
 }
 
 // NetworkGetBandwidthStats gets stats on the current bandwidth usage of the network
@@ -405,11 +390,6 @@ func (api *API) DAGCat(ctx context.Context, c cid.Cid) (io.Reader, error) {
 // node via Bitswap and a copy will be kept in the blockstore.
 func (api *API) DAGImportData(ctx context.Context, data io.Reader) (ipld.Node, error) {
 	return api.dag.ImportData(ctx, data)
-}
-
-// BitswapGetStats returns bitswaps stats.
-func (api *API) BitswapGetStats(ctx context.Context) (*bitswap.Stat, error) {
-	return api.bitswap.(*bitswap.Bitswap).Stat()
 }
 
 // SectorBuilder returns the sector builder

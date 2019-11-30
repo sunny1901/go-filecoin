@@ -60,7 +60,7 @@ func NewBuilder(t *testing.T, miner address.Address) *Builder {
 func NewBuilderWithState(t *testing.T, miner address.Address, sb StateBuilder) *Builder {
 	if miner.Empty() {
 		var err error
-		miner, err = address.NewActorAddress([]byte("miner"))
+		miner, err = address.NewSecp256k1Address([]byte("miner"))
 		require.NoError(t, err)
 	}
 
@@ -399,7 +399,7 @@ type FakeStateEvaluator struct {
 }
 
 // RunStateTransition delegates to StateBuilder.ComputeState.
-func (e *FakeStateEvaluator) RunStateTransition(ctx context.Context, tip block.TipSet, blsMessages [][]*types.UnsignedMessage, secpMessages [][]*types.SignedMessage, ancestors []block.TipSet, parentWeight uint64, stateID cid.Cid) (cid.Cid, []*types.MessageReceipt, error) {
+func (e *FakeStateEvaluator) RunStateTransition(ctx context.Context, tip block.TipSet, blsMessages [][]*types.UnsignedMessage, secpMessages [][]*types.SignedMessage, ancestors []block.TipSet, parentWeight uint64, stateID cid.Cid, receiptCid cid.Cid) (cid.Cid, []*types.MessageReceipt, error) {
 	return e.ComputeState(stateID, blsMessages, secpMessages)
 }
 

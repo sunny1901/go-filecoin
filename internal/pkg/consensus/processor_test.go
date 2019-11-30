@@ -20,7 +20,6 @@ import (
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/abi"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin"
-	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/account"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/miner"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/address"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/errors"
@@ -29,7 +28,7 @@ import (
 
 func requireMakeStateTree(t *testing.T, cst *hamt.CborIpldStore, acts map[address.Address]*actor.Actor) (cid.Cid, state.Tree) {
 	ctx := context.Background()
-	tree := state.NewEmptyStateTree(cst)
+	tree := state.NewTree(cst)
 
 	for addr, act := range acts {
 		err := tree.SetActor(ctx, addr, act)
@@ -40,59 +39,6 @@ func requireMakeStateTree(t *testing.T, cst *hamt.CborIpldStore, acts map[addres
 	require.NoError(t, err)
 
 	return c, tree
-}
-
-func TestProcessBlockSuccess(t *testing.T) {
-	tf.UnitTest(t)
-
-	newAddress := address.NewForTestGetter()
-	ctx := context.Background()
-	cst := hamt.NewCborStore()
-	mockSigner, _ := types.NewMockSignersAndKeyInfo(1)
-
-	startingNetworkBalance := uint64(10000000)
-
-	toAddr := newAddress()
-	minerAddr := newAddress()
-	minerOwnerAddr := newAddress()
-	fromAddr := mockSigner.Addresses[0] // fromAddr needs to be known by signer
-	fromAct := th.RequireNewAccountActor(t, types.NewAttoFILFromFIL(10000))
-	vms := th.VMStorage()
-	minerActor := th.RequireNewMinerActor(t, vms, minerAddr, minerOwnerAddr, 10, th.RequireRandomPeerID(t), types.ZeroAttoFIL)
-	stCid, st := th.RequireMakeStateTree(t, cst, map[address.Address]*actor.Actor{
-		address.NetworkAddress: th.RequireNewAccountActor(t, types.NewAttoFILFromFIL(startingNetworkBalance)),
-		minerAddr:              minerActor,
-		minerOwnerAddr:         th.RequireNewAccountActor(t, types.ZeroAttoFIL),
-		fromAddr:               fromAct,
-	})
-
-	msg := types.NewMeteredMessage(fromAddr, toAddr, 0, types.NewAttoFILFromFIL(550), types.SendMethodID, nil, types.NewGasPrice(1), types.NewGasUnits(0))
-
-	msgs := []*types.UnsignedMessage{msg}
-	blk := &block.Block{
-		Height:    20,
-		StateRoot: stCid,
-		Miner:     minerAddr,
-	}
-	results, err := NewDefaultProcessor().ProcessBlock(ctx, st, vms, blk, msgs, nil)
-	assert.NoError(t, err)
-	assert.Len(t, results, 1)
-
-	gotStCid, err := st.Flush(ctx)
-	assert.NoError(t, err)
-	expAct1, expAct2 := th.RequireNewAccountActor(t, types.NewAttoFILFromFIL(10000-550)), th.RequireNewEmptyActor(types.NewAttoFILFromFIL(550))
-	expAct1.IncNonce()
-	blockRewardAmount := NewDefaultBlockRewarder().BlockRewardAmount()
-	expectedNetworkBalance := types.NewAttoFILFromFIL(startingNetworkBalance).Sub(blockRewardAmount)
-	expStCid, _ := th.RequireMakeStateTree(t, cst, map[address.Address]*actor.Actor{
-		address.NetworkAddress: th.RequireNewAccountActor(t, expectedNetworkBalance),
-		minerAddr:              minerActor,
-		minerOwnerAddr:         th.RequireNewAccountActor(t, blockRewardAmount),
-		fromAddr:               expAct1,
-		toAddr:                 expAct2,
-	})
-
-	assert.True(t, expStCid.Equals(gotStCid))
 }
 
 func TestProcessTipSetSuccess(t *testing.T) {
@@ -120,7 +66,7 @@ func TestProcessTipSetSuccess(t *testing.T) {
 	})
 
 	vms := th.VMStorage()
-	minerOwner, err := address.NewActorAddress([]byte("mo"))
+	minerOwner, err := address.NewSecp256k1Address([]byte("mo"))
 	require.NoError(t, err)
 	stCid, miner := mustCreateStorageMiner(ctx, t, st, vms, minerAddr, minerOwner)
 
@@ -148,7 +94,11 @@ func TestProcessTipSetSuccess(t *testing.T) {
 	tsMsgs := [][]*types.UnsignedMessage{msgs1, msgs2}
 	res, err := NewDefaultProcessor().ProcessTipSet(ctx, st, vms, th.RequireNewTipSet(t, blk1, blk2), tsMsgs, nil)
 	assert.NoError(t, err)
-	assert.Len(t, res.Results, 2)
+	assert.Len(t, res, 2)
+	for _, r := range res {
+		assert.NoError(t, r.Failure)
+		assert.Equal(t, uint8(0), r.Receipt.ExitCode)
+	}
 
 	gotStCid, err := st.Flush(ctx)
 	assert.NoError(t, err)
@@ -189,7 +139,7 @@ func TestProcessTipsConflicts(t *testing.T) {
 		fromAddr:               act1,
 	})
 
-	minerOwner, err := address.NewActorAddress([]byte("mo"))
+	minerOwner, err := address.NewSecp256k1Address([]byte("mo"))
 	require.NoError(t, err)
 	stCid, miner := mustCreateStorageMiner(ctx, t, st, vms, minerAddr, minerOwner)
 
@@ -214,7 +164,12 @@ func TestProcessTipsConflicts(t *testing.T) {
 	tsMsgs := [][]*types.UnsignedMessage{msgs1, msgs2}
 	res, err := NewDefaultProcessor().ProcessTipSet(ctx, st, vms, th.RequireNewTipSet(t, blk1, blk2), tsMsgs, nil)
 	assert.NoError(t, err)
-	assert.Len(t, res.Results, 1)
+	assert.Len(t, res, 2)
+	assert.NoError(t, res[0].Failure)
+	assert.Equal(t, uint8(0), res[0].Receipt.ExitCode)
+	assert.Error(t, res[1].Failure)
+	// Insufficient balance to cover gas is marked as a permanent error, but probably shouldn't be.
+	assert.True(t, res[1].FailureIsPermanent)
 
 	gotStCid, err := st.Flush(ctx)
 	assert.NoError(t, err)
@@ -234,8 +189,8 @@ func TestProcessTipsConflicts(t *testing.T) {
 	assert.True(t, expStCid.Equals(gotStCid))
 }
 
-// ProcessBlock should not fail with an unsigned block reward message.
-func TestProcessBlockReward(t *testing.T) {
+// ProcessTipset should not fail with an unsigned block reward message.
+func TestProcessTipsetReward(t *testing.T) {
 	tf.UnitTest(t)
 
 	newAddress := address.NewForTestGetter()
@@ -263,9 +218,9 @@ func TestProcessBlockReward(t *testing.T) {
 		Height:    20,
 		StateRoot: stCid,
 	}
-	ret, err := NewDefaultProcessor().ProcessBlock(ctx, st, vms, blk, []*types.UnsignedMessage{}, nil)
+	results, err := NewDefaultProcessor().ProcessTipSet(ctx, st, vms, RequireNewTipSet(require.New(t), blk), [][]*types.UnsignedMessage{{}}, nil)
 	require.NoError(t, err)
-	assert.Nil(t, ret)
+	assert.Len(t, results, 0)
 
 	minerOwnerActor, err := st.GetActor(ctx, minerOwnerAddr)
 	require.NoError(t, err)
@@ -274,7 +229,7 @@ func TestProcessBlockReward(t *testing.T) {
 	assert.Equal(t, minerBalance.Add(blockRewardAmount), minerOwnerActor.Balance)
 }
 
-func TestProcessBlockVMErrors(t *testing.T) {
+func TestProcessTipsetVMErrors(t *testing.T) {
 	tf.BadUnitTestWithSideEffects(t)
 
 	ctx := context.Background()
@@ -305,8 +260,8 @@ func TestProcessBlockVMErrors(t *testing.T) {
 
 	stCid, miner := mustCreateStorageMiner(ctx, t, st, vms, minerAddr, minerOwnerAddr)
 
-	msgs := []*types.UnsignedMessage{types.NewMeteredMessage(fromAddr, toAddr, 0, types.ZeroAttoFIL,
-		actor.ReturnRevertErrorID, nil, types.NewGasPrice(1), types.NewGasUnits(0))}
+	msgs := [][]*types.UnsignedMessage{{types.NewMeteredMessage(fromAddr, toAddr, 0, types.ZeroAttoFIL,
+		actor.ReturnRevertErrorID, nil, types.NewGasPrice(1), types.NewGasUnits(0))}}
 	blk := &block.Block{
 		Height:    20,
 		StateRoot: stCid,
@@ -316,7 +271,7 @@ func TestProcessBlockVMErrors(t *testing.T) {
 	// The "foo" message will cause a vm error and
 	// we're going to check four things...
 	processor := NewConfiguredProcessor(NewDefaultMessageValidator(), NewDefaultBlockRewarder(), actors)
-	results, err := processor.ProcessBlock(ctx, st, vms, blk, msgs, nil)
+	results, err := processor.ProcessTipSet(ctx, st, vms, RequireNewTipSet(require.New(t), blk), msgs, nil)
 
 	// 1. That a VM error is not a message failure (err).
 	assert.NoError(t, err)
@@ -343,7 +298,7 @@ func TestProcessBlockVMErrors(t *testing.T) {
 	assert.True(t, expectedStCid.Equals(gotStCid))
 }
 
-func TestProcessBlockParamsLengthError(t *testing.T) {
+func TestProcessTipsetParamsLengthError(t *testing.T) {
 	tf.UnitTest(t)
 
 	newAddress := address.NewForTestGetter()
@@ -370,7 +325,7 @@ func TestProcessBlockParamsLengthError(t *testing.T) {
 	assert.Contains(t, rct.ExecutionError.Error(), "invalid params: expected 0 parameters, but got 1")
 }
 
-func TestProcessBlockParamsError(t *testing.T) {
+func TestProcessTipsetParamsError(t *testing.T) {
 	tf.UnitTest(t)
 
 	newAddress := address.NewForTestGetter()
@@ -660,11 +615,11 @@ func TestSendToNonexistentAddressThenSpendFromIt(t *testing.T) {
 	// get all 3 actors
 	act1 = state.MustGetActor(st, addr1)
 	assert.Equal(t, types.NewAttoFILFromFIL(500), act1.Balance)
-	assert.True(t, account.IsAccount(act1))
+	assert.True(t, types.AccountActorCodeCid.Equals(act1.Code))
 
 	act2 := state.MustGetActor(st, addr2)
 	assert.Equal(t, types.NewAttoFILFromFIL(200), act2.Balance)
-	assert.True(t, account.IsAccount(act2))
+	assert.True(t, types.AccountActorCodeCid.Equals(act2.Code))
 
 	act3 := state.MustGetActor(st, addr3)
 	assert.Equal(t, types.NewAttoFILFromFIL(300), act3.Balance)

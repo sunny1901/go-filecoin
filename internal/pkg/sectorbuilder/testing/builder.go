@@ -70,7 +70,7 @@ func (b *Builder) Build() Harness {
 	memRepo := repo.NewInMemoryRepo()
 	blockStore := bstore.NewBlockstore(memRepo.Datastore())
 	blockService := bserv.New(blockStore, offline.Exchange(blockStore))
-	minerAddr, err := address.NewActorAddress([]byte("wombat"))
+	minerAddr, err := address.NewSecp256k1Address([]byte("wombat"))
 	if err != nil {
 		panic(err)
 	}
@@ -78,7 +78,6 @@ func (b *Builder) Build() Harness {
 	class := types.NewSectorClass(types.OneKiBSectorSize)
 
 	sb, err := sectorbuilder.NewRustSectorBuilder(sectorbuilder.RustSectorBuilderConfig{
-		BlockService:     blockService,
 		LastUsedSectorID: 0,
 		MetadataDir:      b.stagingDir,
 		MinerAddr:        minerAddr,

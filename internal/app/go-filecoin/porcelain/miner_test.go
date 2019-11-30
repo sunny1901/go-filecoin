@@ -9,7 +9,7 @@ import (
 
 	"github.com/filecoin-project/go-filecoin/internal/pkg/block"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/encoding"
-	"github.com/filecoin-project/go-filecoin/internal/pkg/vm2/external"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/vm"
 	"github.com/filecoin-project/go-leb128"
 	"github.com/ipfs/go-cid"
 	"github.com/libp2p/go-libp2p-core/peer"
@@ -21,7 +21,7 @@ import (
 	"github.com/filecoin-project/go-filecoin/internal/pkg/types"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/abi"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/miner"
-	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/storagemarket"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/power"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/address"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/wallet"
 
@@ -59,13 +59,13 @@ func (mpc *minerCreate) ConfigSet(dottedPath string, paramJSON string) error {
 	return mpc.config.Set(dottedPath, paramJSON)
 }
 
-func (mpc *minerCreate) MessageSend(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method types.MethodID, params ...interface{}) (cid.Cid, error) {
+func (mpc *minerCreate) MessageSend(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method types.MethodID, params ...interface{}) (cid.Cid, chan error, error) {
 	if mpc.msgFail {
-		return cid.Cid{}, errors.New("test Error")
+		return cid.Cid{}, nil, errors.New("test Error")
 	}
 	mpc.msgCid = types.CidFromString(mpc.testing, "somecid")
 
-	return mpc.msgCid, nil
+	return mpc.msgCid, nil, nil
 }
 
 func (mpc *minerCreate) MessageWait(ctx context.Context, msgCid cid.Cid, cb func(*block.Block, *types.SignedMessage, *types.MessageReceipt) error) error {
@@ -178,7 +178,7 @@ type minerSetPricePlumbing struct {
 	failSend bool
 	failWait bool
 
-	messageSend func(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method types.MethodID, params ...interface{}) (cid.Cid, error)
+	messageSend func(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method types.MethodID, params ...interface{}) (cid.Cid, chan error, error)
 }
 
 func newMinerSetPricePlumbing(t *testing.T) *minerSetPricePlumbing {
@@ -188,19 +188,19 @@ func newMinerSetPricePlumbing(t *testing.T) *minerSetPricePlumbing {
 	}
 }
 
-func (mtp *minerSetPricePlumbing) MessageSend(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method types.MethodID, params ...interface{}) (cid.Cid, error) {
+func (mtp *minerSetPricePlumbing) MessageSend(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method types.MethodID, params ...interface{}) (cid.Cid, chan error, error) {
 	if mtp.failSend {
-		return cid.Cid{}, errors.New("test error in MessageSend")
+		return cid.Cid{}, nil, errors.New("test error in MessageSend")
 	}
 
 	if mtp.messageSend != nil {
-		msgCid, err := mtp.messageSend(ctx, from, to, value, gasPrice, gasLimit, method, params...)
+		msgCid, _, err := mtp.messageSend(ctx, from, to, value, gasPrice, gasLimit, method, params...)
 		mtp.msgCid = msgCid
-		return msgCid, err
+		return msgCid, nil, err
 	}
 
 	mtp.msgCid = types.NewCidForTestGetter()()
-	return mtp.msgCid, nil
+	return mtp.msgCid, nil, nil
 }
 
 // calls back immediately
@@ -296,9 +296,9 @@ func TestMinerSetPrice(t *testing.T) {
 		price := types.NewAttoFILFromFIL(50)
 		minerAddr := address.NewForTestGetter()()
 
-		plumbing.messageSend = func(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method types.MethodID, params ...interface{}) (cid.Cid, error) {
+		plumbing.messageSend = func(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method types.MethodID, params ...interface{}) (cid.Cid, chan error, error) {
 			assert.Equal(t, minerAddr, to)
-			return types.NewCidForTestGetter()(), nil
+			return types.NewCidForTestGetter()(), nil, nil
 		}
 
 		_, err := MinerSetPrice(ctx, plumbing, address.Undef, minerAddr, types.NewGasPrice(0), types.NewGasUnits(0), price, big.NewInt(0))
@@ -314,9 +314,9 @@ func TestMinerSetPrice(t *testing.T) {
 		ctx := context.Background()
 		price := types.NewAttoFILFromFIL(50)
 
-		plumbing.messageSend = func(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method types.MethodID, params ...interface{}) (cid.Cid, error) {
+		plumbing.messageSend = func(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method types.MethodID, params ...interface{}) (cid.Cid, chan error, error) {
 			assert.Equal(t, minerAddr, to)
-			return types.NewCidForTestGetter()(), nil
+			return types.NewCidForTestGetter()(), nil, nil
 		}
 
 		_, err := MinerSetPrice(ctx, plumbing, address.Undef, address.Undef, types.NewGasPrice(0), types.NewGasUnits(0), price, big.NewInt(0))
@@ -330,11 +330,11 @@ func TestMinerSetPrice(t *testing.T) {
 		price := types.NewAttoFILFromFIL(50)
 		expiry := big.NewInt(24)
 
-		plumbing.messageSend = func(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method types.MethodID, params ...interface{}) (cid.Cid, error) {
+		plumbing.messageSend = func(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method types.MethodID, params ...interface{}) (cid.Cid, chan error, error) {
 			assert.Equal(t, miner.AddAsk, method)
 			assert.Equal(t, price, params[0])
 			assert.Equal(t, expiry, params[1])
-			return types.NewCidForTestGetter()(), nil
+			return types.NewCidForTestGetter()(), nil, nil
 		}
 
 		_, err := MinerSetPrice(ctx, plumbing, address.Undef, address.Undef, types.NewGasPrice(0), types.NewGasUnits(0), price, expiry)
@@ -363,8 +363,8 @@ func TestMinerSetPrice(t *testing.T) {
 
 		messageCid := types.NewCidForTestGetter()()
 
-		plumbing.messageSend = func(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method types.MethodID, params ...interface{}) (cid.Cid, error) {
-			return messageCid, nil
+		plumbing.messageSend = func(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method types.MethodID, params ...interface{}) (cid.Cid, chan error, error) {
+			return messageCid, nil, nil
 		}
 
 		res, err := MinerSetPrice(ctx, plumbing, address.Undef, minerAddr, types.NewGasPrice(0), types.NewGasUnits(0), price, expiry)
@@ -428,18 +428,24 @@ func (mgop *minerQueryAndDeserializePlumbing) MessageQuery(ctx context.Context, 
 		return [][]byte{address.TestAddress.Bytes()}, nil
 	case miner.GetWorker:
 		return [][]byte{address.TestAddress2.Bytes()}, nil
-	case miner.GetPower:
-		return [][]byte{types.NewBytesAmount(2).Bytes()}, nil
-	case storagemarket.GetTotalStorage:
+	case power.GetPowerReport:
+		powerReport := types.NewPowerReport(2, 0)
+		val := abi.Value{
+			Val:  powerReport,
+			Type: abi.PowerReport,
+		}
+		raw, err := val.Serialize()
+		return [][]byte{raw}, err
+	case power.GetTotalPower:
 		return [][]byte{types.NewBytesAmount(4).Bytes()}, nil
 	default:
 		return nil, fmt.Errorf("unsupported method: %s", method)
 	}
 }
 
-func (mgop *minerQueryAndDeserializePlumbing) ActorGetSignature(ctx context.Context, actorAddr address.Address, method types.MethodID) (*external.FunctionSignature, error) {
+func (mgop *minerQueryAndDeserializePlumbing) ActorGetStableSignature(ctx context.Context, actorAddr address.Address, method types.MethodID) (*vm.FunctionSignature, error) {
 	if method == miner.GetSectorSize {
-		return &external.FunctionSignature{
+		return &vm.FunctionSignature{
 			Params: nil,
 			Return: []abi.Type{abi.BytesAmount},
 		}, nil
@@ -481,7 +487,11 @@ func (mpp *minerGetProvingPeriodPlumbing) ChainHeadKey() block.TipSetKey {
 
 func (mpp *minerGetProvingPeriodPlumbing) MessageQuery(ctx context.Context, optFrom, to address.Address, method types.MethodID, _ block.TipSetKey, params ...interface{}) ([][]byte, error) {
 	if method == miner.GetProvingWindow {
-		return [][]byte{types.NewBlockHeight(10).Bytes(), types.NewBlockHeight(20).Bytes()}, nil
+		ret, err := (&abi.Value{Type: abi.UintArray, Val: []types.Uint64{10, 20}}).Serialize()
+		if err != nil {
+			return nil, err
+		}
+		return [][]byte{ret}, nil
 	}
 	if method == miner.GetProvingSetCommitments {
 		commitments := make(map[string]types.Commitments)
@@ -490,15 +500,18 @@ func (mpp *minerGetProvingPeriodPlumbing) MessageQuery(ctx context.Context, optF
 			CommR:     [32]byte{1},
 			CommRStar: [32]byte{1},
 		}
-		thing, _ := encoding.Encode(commitments)
+		thing, err := encoding.Encode(commitments)
+		if err != nil {
+			return nil, err
+		}
 		return [][]byte{thing}, nil
 	}
 	return nil, fmt.Errorf("unsupported method: %s", method)
 }
 
-func (mpp *minerGetProvingPeriodPlumbing) ActorGetSignature(ctx context.Context, actorAddr address.Address, method types.MethodID) (*external.FunctionSignature, error) {
+func (mpp *minerGetProvingPeriodPlumbing) ActorGetStableSignature(ctx context.Context, actorAddr address.Address, method types.MethodID) (*vm.FunctionSignature, error) {
 	if method == miner.GetProvingSetCommitments {
-		return &external.FunctionSignature{
+		return &vm.FunctionSignature{
 			Params: nil,
 			Return: []abi.Type{abi.CommitmentsMap},
 		}, nil
@@ -586,8 +599,8 @@ func (minerGetSectorSizePlumbing) ChainHeadKey() block.TipSetKey {
 func (minerGetSectorSizePlumbing) MessageQuery(ctx context.Context, optFrom, to address.Address, method types.MethodID, _ block.TipSetKey, params ...interface{}) ([][]byte, error) {
 	return [][]byte{types.NewBytesAmount(1234).Bytes()}, nil
 }
-func (minerGetSectorSizePlumbing) ActorGetSignature(ctx context.Context, actorAddr address.Address, method types.MethodID) (*external.FunctionSignature, error) {
-	return &external.FunctionSignature{
+func (minerGetSectorSizePlumbing) ActorGetStableSignature(ctx context.Context, actorAddr address.Address, method types.MethodID) (*vm.FunctionSignature, error) {
+	return &vm.FunctionSignature{
 		Params: nil,
 		Return: []abi.Type{abi.BytesAmount},
 	}, nil
@@ -611,8 +624,8 @@ func (minerGetLastCommittedSectorIDPlumbing) ChainHeadKey() block.TipSetKey {
 func (minerGetLastCommittedSectorIDPlumbing) MessageQuery(ctx context.Context, optFrom, to address.Address, method types.MethodID, _ block.TipSetKey, params ...interface{}) ([][]byte, error) {
 	return [][]byte{leb128.FromUInt64(5432)}, nil
 }
-func (minerGetLastCommittedSectorIDPlumbing) ActorGetSignature(ctx context.Context, actorAddr address.Address, method types.MethodID) (*external.FunctionSignature, error) {
-	return &external.FunctionSignature{
+func (minerGetLastCommittedSectorIDPlumbing) ActorGetStableSignature(ctx context.Context, actorAddr address.Address, method types.MethodID) (*vm.FunctionSignature, error) {
+	return &vm.FunctionSignature{
 		Params: nil,
 		Return: []abi.Type{abi.SectorID},
 	}, nil
@@ -632,12 +645,12 @@ type minerSetWorkerAddressPlumbing struct {
 	minerAddr, ownerAddr, workerAddr                           address.Address
 }
 
-func (mswap *minerSetWorkerAddressPlumbing) MessageSend(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method types.MethodID, params ...interface{}) (cid.Cid, error) {
+func (mswap *minerSetWorkerAddressPlumbing) MessageSend(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method types.MethodID, params ...interface{}) (cid.Cid, chan error, error) {
 
 	if mswap.msgFail {
-		return cid.Cid{}, errors.New("MsgFail")
+		return cid.Cid{}, nil, errors.New("MsgFail")
 	}
-	return types.EmptyMessagesCID, nil
+	return types.EmptyMessagesCID, nil, nil
 }
 
 func (mswap *minerSetWorkerAddressPlumbing) MessageWait(ctx context.Context, msgCid cid.Cid, cb func(*block.Block, *types.SignedMessage, *types.MessageReceipt) error) error {

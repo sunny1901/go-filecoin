@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/filecoin-project/go-filecoin/internal/pkg/block"
-	"github.com/filecoin-project/go-filecoin/internal/pkg/vm2/external"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/vm"
 	"github.com/ipfs/go-cid"
 	cmdkit "github.com/ipfs/go-ipfs-cmdkit"
 	cmds "github.com/ipfs/go-ipfs-cmds"
@@ -106,7 +106,7 @@ var msgSendCmd = &cmds.Command{
 			})
 		}
 
-		c, err := GetPorcelainAPI(env).MessageSend(
+		c, _, err := GetPorcelainAPI(env).MessageSend(
 			req.Context,
 			fromAddr,
 			target,
@@ -159,7 +159,7 @@ var signedMsgSendCmd = &cmds.Command{
 		}
 		signed := &m
 
-		c, err := GetPorcelainAPI(env).SignedMessageSend(
+		c, _, err := GetPorcelainAPI(env).SignedMessageSend(
 			req.Context,
 			signed,
 		)
@@ -190,7 +190,7 @@ var signedMsgSendCmd = &cmds.Command{
 type WaitResult struct {
 	Message   *types.SignedMessage
 	Receipt   *types.MessageReceipt
-	Signature *external.FunctionSignature
+	Signature *vm.FunctionSignature
 }
 
 var msgWaitCmd = &cmds.Command{

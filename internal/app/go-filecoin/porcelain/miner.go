@@ -8,7 +8,7 @@ import (
 
 	"github.com/filecoin-project/go-filecoin/internal/pkg/block"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/encoding"
-	"github.com/filecoin-project/go-filecoin/internal/pkg/vm2/external"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/vm"
 	"github.com/ipfs/go-cid"
 	"github.com/libp2p/go-libp2p-core/peer"
 	"github.com/pkg/errors"
@@ -16,6 +16,7 @@ import (
 	"github.com/filecoin-project/go-filecoin/internal/pkg/types"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/abi"
 	minerActor "github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/miner"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/power"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/storagemarket"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/address"
 	vmErrors "github.com/filecoin-project/go-filecoin/internal/pkg/vm/errors"
@@ -25,7 +26,7 @@ import (
 type mcAPI interface {
 	ConfigGet(dottedPath string) (interface{}, error)
 	ConfigSet(dottedPath string, paramJSON string) error
-	MessageSend(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method types.MethodID, params ...interface{}) (cid.Cid, error)
+	MessageSend(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method types.MethodID, params ...interface{}) (cid.Cid, chan error, error)
 	MessageWait(ctx context.Context, msgCid cid.Cid, cb func(*block.Block, *types.SignedMessage, *types.MessageReceipt) error) error
 	WalletDefaultAddress() (address.Address, error)
 }
@@ -59,7 +60,7 @@ func MinerCreate(
 		return nil, fmt.Errorf("can only have one miner per node")
 	}
 
-	smsgCid, err := plumbing.MessageSend(
+	smsgCid, _, err := plumbing.MessageSend(
 		ctx,
 		minerOwnerAddr,
 		address.StorageMarketAddress,
@@ -143,7 +144,7 @@ func MinerPreviewCreate(
 type mspAPI interface {
 	ConfigGet(dottedPath string) (interface{}, error)
 	ConfigSet(dottedKey string, jsonString string) error
-	MessageSend(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method types.MethodID, params ...interface{}) (cid.Cid, error)
+	MessageSend(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method types.MethodID, params ...interface{}) (cid.Cid, chan error, error)
 	MessageWait(ctx context.Context, msgCid cid.Cid, cb func(*block.Block, *types.SignedMessage, *types.MessageReceipt) error) error
 }
 
@@ -187,7 +188,7 @@ func MinerSetPrice(ctx context.Context, plumbing mspAPI, from address.Address, m
 	}
 
 	// create ask
-	res.AddAskCid, err = plumbing.MessageSend(ctx, from, res.MinerAddr, types.ZeroAttoFIL, gasPrice, gasLimit, minerActor.AddAsk, price, expiry)
+	res.AddAskCid, _, err = plumbing.MessageSend(ctx, from, res.MinerAddr, types.ZeroAttoFIL, gasPrice, gasLimit, minerActor.AddAsk, price, expiry)
 	if err != nil {
 		return res, errors.Wrap(err, "couldn't send message")
 	}
@@ -257,7 +258,7 @@ func MinerPreviewSetPrice(ctx context.Context, plumbing mpspAPI, from address.Ad
 type minerQueryAndDeserialize interface {
 	ChainHeadKey() block.TipSetKey
 	MessageQuery(ctx context.Context, optFrom, to address.Address, method types.MethodID, baseKey block.TipSetKey, params ...interface{}) ([][]byte, error)
-	ActorGetSignature(ctx context.Context, actorAddr address.Address, method types.MethodID) (*external.FunctionSignature, error)
+	ActorGetStableSignature(ctx context.Context, actorAddr address.Address, method types.MethodID) (*vm.FunctionSignature, error)
 }
 
 // MinerGetOwnerAddress queries for the owner address of the given miner
@@ -289,7 +290,7 @@ func queryAndDeserialize(ctx context.Context, plumbing minerQueryAndDeserialize,
 		return nil, errors.Wrapf(err, "'%s' query message failed", method)
 	}
 
-	methodSignature, err := plumbing.ActorGetSignature(ctx, minerAddr, method)
+	methodSignature, err := plumbing.ActorGetStableSignature(ctx, minerAddr, method)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to acquire '%s' signature", method)
 	}
@@ -409,7 +410,12 @@ func MinerGetProvingWindow(ctx context.Context, plumbing minerQueryAndDeserializ
 	if err != nil {
 		return MinerProvingWindow{}, errors.Wrap(err, "query ProvingPeriod method failed")
 	}
-	start, end := types.NewBlockHeightFromBytes(res[0]), types.NewBlockHeightFromBytes(res[1])
+
+	window, err := abi.Deserialize(res[0], abi.UintArray)
+	if err != nil {
+		return MinerProvingWindow{}, err
+	}
+	windowVal := window.Val.([]types.Uint64)
 
 	res, err = plumbing.MessageQuery(
 		ctx,
@@ -422,7 +428,7 @@ func MinerGetProvingWindow(ctx context.Context, plumbing minerQueryAndDeserializ
 		return MinerProvingWindow{}, errors.Wrap(err, "query SetCommitments method failed")
 	}
 
-	sig, err := plumbing.ActorGetSignature(ctx, minerAddr, minerActor.GetProvingSetCommitments)
+	sig, err := plumbing.ActorGetStableSignature(ctx, minerAddr, minerActor.GetProvingSetCommitments)
 	if err != nil {
 		return MinerProvingWindow{}, errors.Wrap(err, "query method failed")
 	}
@@ -437,8 +443,8 @@ func MinerGetProvingWindow(ctx context.Context, plumbing minerQueryAndDeserializ
 	}
 
 	return MinerProvingWindow{
-		Start:      *start,
-		End:        *end,
+		Start:      *types.NewBlockHeight(uint64(windowVal[0])),
+		End:        *types.NewBlockHeight(uint64(windowVal[1])),
 		ProvingSet: commitments,
 	}, nil
 }
@@ -454,20 +460,29 @@ func MinerGetPower(ctx context.Context, plumbing mgaAPI, minerAddr address.Addre
 	bytes, err := plumbing.MessageQuery(
 		ctx,
 		address.Undef,
-		minerAddr,
-		minerActor.GetPower,
+		address.PowerAddress,
+		power.GetPowerReport,
 		plumbing.ChainHeadKey(),
+		minerAddr,
 	)
 	if err != nil {
 		return MinerPower{}, err
 	}
-	power := types.NewBytesAmountFromBytes(bytes[0])
+	reportValue, err := abi.Deserialize(bytes[0], abi.PowerReport)
+	if err != nil {
+		return MinerPower{}, err
+	}
+	powerReport, ok := reportValue.Val.(types.PowerReport)
+	if !ok {
+		return MinerPower{}, errors.Errorf("invalid report bytes returned from GetPower")
+	}
+	minerPower := powerReport.ActivePower
 
 	bytes, err = plumbing.MessageQuery(
 		ctx,
 		address.Undef,
-		address.StorageMarketAddress,
-		storagemarket.GetTotalStorage,
+		address.PowerAddress,
+		power.GetTotalPower,
 		plumbing.ChainHeadKey(),
 	)
 	if err != nil {
@@ -476,7 +491,7 @@ func MinerGetPower(ctx context.Context, plumbing mgaAPI, minerAddr address.Addre
 	total := types.NewBytesAmountFromBytes(bytes[0])
 
 	return MinerPower{
-		Power: *power,
+		Power: *minerPower,
 		Total: *total,
 	}, nil
 }
@@ -499,7 +514,7 @@ func MinerGetCollateral(ctx context.Context, plumbing mgaAPI, minerAddr address.
 // mwapi is the subset of the plumbing.API that MinerSetWorkerAddress use.
 type mwapi interface {
 	ConfigGet(dottedPath string) (interface{}, error)
-	MessageSend(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method types.MethodID, params ...interface{}) (cid.Cid, error)
+	MessageSend(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method types.MethodID, params ...interface{}) (cid.Cid, chan error, error)
 	MinerGetOwnerAddress(ctx context.Context, minerAddr address.Address) (address.Address, error)
 }
 
@@ -527,7 +542,7 @@ func MinerSetWorkerAddress(
 		return cid.Undef, errors.Wrap(err, "could not get miner owner address")
 	}
 
-	return plumbing.MessageSend(
+	c, _, err := plumbing.MessageSend(
 		ctx,
 		minerOwnerAddr,
 		minerAddr,
@@ -536,4 +551,5 @@ func MinerSetWorkerAddress(
 		gasLimit,
 		minerActor.ChangeWorker,
 		workerAddr)
+	return c, err
 }

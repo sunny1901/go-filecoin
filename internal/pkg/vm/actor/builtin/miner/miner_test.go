@@ -29,9 +29,11 @@ import (
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/storagemarket"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/address"
 	vmerrors "github.com/filecoin-project/go-filecoin/internal/pkg/vm/errors"
+	internal "github.com/filecoin-project/go-filecoin/internal/pkg/vm/internal/errors"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/internal/gastracker"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/internal/storagemap"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/internal/vmcontext"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/state"
-	"github.com/filecoin-project/go-filecoin/internal/pkg/vm2"
-	"github.com/filecoin-project/go-filecoin/internal/pkg/vm2/vminternal/errors"
 )
 
 func TestAskFunctions(t *testing.T) {
@@ -42,7 +44,8 @@ func TestAskFunctions(t *testing.T) {
 
 	st, vms := th.RequireCreateStorages(ctx, t)
 
-	minerAddr := th.CreateTestMiner(t, st, vms, address.TestAddress, th.RequireRandomPeerID(t))
+	outAddr := th.CreateTestMiner(t, st, vms, address.TestAddress, th.RequireRandomPeerID(t))
+	minerAddr := th.RequireActorIDAddress(ctx, t, st, vms, outAddr)
 
 	// make an ask, and then make sure it all looks good
 	pdata := actor.MustConvertParams(types.NewAttoFILFromFIL(5), big.NewInt(1500))
@@ -99,7 +102,7 @@ func TestAskFunctions(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NoError(t, result.ExecutionError)
 
-	var askids []uint64
+	var askids []types.Uint64
 	require.NoError(t, actor.UnmarshalStorage(result.Receipt.Return[0], &askids))
 	assert.Len(t, askids, 2)
 }
@@ -110,9 +113,8 @@ func TestChangeWorker(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	st, vms := th.RequireCreateStorages(ctx, t)
-
 	t.Run("Change worker address", func(t *testing.T) {
+		st, vms := th.RequireCreateStorages(ctx, t)
 		minerAddr := th.CreateTestMiner(t, st, vms, address.TestAddress, th.RequireRandomPeerID(t))
 
 		// retrieve worker before changing it
@@ -143,6 +145,7 @@ func TestChangeWorker(t *testing.T) {
 	})
 
 	t.Run("Only owner can change address", func(t *testing.T) {
+		st, vms := th.RequireCreateStorages(ctx, t)
 		minerAddr := th.CreateTestMiner(t, st, vms, address.TestAddress, th.RequireRandomPeerID(t))
 
 		// change worker
@@ -158,7 +161,9 @@ func TestChangeWorker(t *testing.T) {
 	})
 
 	t.Run("Errors when gas cost too low", func(t *testing.T) {
-		minerAddr := th.CreateTestMiner(t, st, vms, address.TestAddress, th.RequireRandomPeerID(t))
+		st, vms := th.RequireCreateStorages(ctx, t)
+		outAddr := th.CreateTestMiner(t, st, vms, address.TestAddress, th.RequireRandomPeerID(t))
+		minerAddr := th.RequireActorIDAddress(ctx, t, st, vms, outAddr)
 		mockSigner, _ := types.NewMockSignersAndKeyInfo(1)
 
 		// change worker
@@ -172,8 +177,39 @@ func TestChangeWorker(t *testing.T) {
 
 		require.Error(t, result.ExecutionError)
 		assert.Contains(t, result.ExecutionError.Error(), "Insufficient gas")
-		assert.Equal(t, uint8(vminternal.ErrInsufficientGas), result.Receipt.ExitCode)
+		assert.Equal(t, uint8(internal.ErrInsufficientGas), result.Receipt.ExitCode)
 	})
+}
+
+func TestConstructor(t *testing.T) {
+	tf.UnitTest(t)
+
+	message := types.NewUnsignedMessage(address.TestAddress, address.TestAddress2, 0, types.ZeroAttoFIL, types.ConstructorMethodID, nil)
+	vmctx := vm.NewFakeVMContext(message, nil)
+	storageMap := th.VMStorage()
+	minerActor := actor.NewActor(types.MinerActorCodeCid, types.ZeroAttoFIL)
+	vmctx.StorageValue = storageMap.NewStorage(address.TestAddress, minerActor)
+
+	act := &Actor{}
+	addrGetter := address.NewForTestGetter()
+	owner := addrGetter()
+	worker := addrGetter()
+	sectorSize := types.NewBytesAmount(42)
+	pid := th.RequireIntPeerID(t, 3)
+
+	(*Impl)(act).Constructor(vmctx, owner, worker, pid, sectorSize)
+
+	stateEncoded, err := vmctx.Storage().Get(minerActor.Head)
+	require.NoError(t, err)
+
+	state := &State{}
+	err = encoding.Decode(stateEncoded, state)
+	require.NoError(t, err)
+
+	assert.Equal(t, state.Owner, owner)
+	assert.Equal(t, state.Worker, worker)
+	assert.Equal(t, state.PeerID, pid)
+	assert.Equal(t, state.SectorSize, sectorSize)
 }
 
 func TestGetWorker(t *testing.T) {
@@ -364,19 +400,13 @@ func TestMinerGetProvingPeriod(t *testing.T) {
 
 		// retrieve proving period
 		result := callQueryMethodSuccess(GetProvingWindow, ctx, t, st, vms, address.TestAddress, minerAddr)
-		startVal, err := abi.Deserialize(result[0], abi.BlockHeight)
+		window, err := abi.Deserialize(result[0], abi.UintArray)
 		require.NoError(t, err)
+		start := window.Val.([]types.Uint64)[0]
+		end := window.Val.([]types.Uint64)[1]
 
-		start, ok := startVal.Val.(*types.BlockHeight)
-		require.True(t, ok)
-		assert.Equal(t, types.NewBlockHeight(0), start)
-
-		endVal, err := abi.Deserialize(result[0], abi.BlockHeight)
-		require.NoError(t, err)
-
-		end, ok := endVal.Val.(*types.BlockHeight)
-		require.True(t, ok)
-		assert.Equal(t, types.NewBlockHeight(0), end)
+		assert.Equal(t, types.Uint64(0), start)
+		assert.Equal(t, types.Uint64(0), end)
 	})
 
 	t.Run("GetProvingWindow returns the start and end of the proving period", func(t *testing.T) {
@@ -400,28 +430,22 @@ func TestMinerGetProvingPeriod(t *testing.T) {
 
 		// retrieve proving period
 		result := callQueryMethodSuccess(GetProvingWindow, ctx, t, st, vms, address.TestAddress, minerAddr)
-		startVal, err := abi.Deserialize(result[0], abi.BlockHeight)
+		window, err := abi.Deserialize(result[0], abi.UintArray)
 		require.NoError(t, err)
+		start := window.Val.([]types.Uint64)[0]
+		end := window.Val.([]types.Uint64)[1]
 
 		// end of proving period is now plus proving period size
-		expectedEnd := types.NewBlockHeight(blockHeight).Add(types.NewBlockHeight(uint64(LargestSectorSizeProvingPeriodBlocks)))
+		expectedEnd := blockHeight + uint64(LargestSectorSizeProvingPeriodBlocks)
 		// start of proving period is end minus the PoSt challenge time
-		expectedStart := expectedEnd.Sub(types.NewBlockHeight(PoStChallengeWindowBlocks))
+		expectedStart := expectedEnd - PoStChallengeWindowBlocks
 
-		start, ok := startVal.Val.(*types.BlockHeight)
-		require.True(t, ok)
-		assert.Equal(t, expectedStart, start)
-
-		endVal, err := abi.Deserialize(result[1], abi.BlockHeight)
-		require.NoError(t, err)
-
-		end, ok := endVal.Val.(*types.BlockHeight)
-		require.True(t, ok)
-		assert.Equal(t, expectedEnd, end)
+		assert.Equal(t, types.Uint64(expectedStart), start)
+		assert.Equal(t, types.Uint64(expectedEnd), end)
 	})
 }
 
-func updatePeerIdSuccess(t *testing.T, st state.Tree, vms vm.StorageMap, fromAddr address.Address, minerAddr address.Address, newPid peer.ID) {
+func updatePeerIdSuccess(t *testing.T, st state.Tree, vms storagemap.StorageMap, fromAddr address.Address, minerAddr address.Address, newPid peer.ID) {
 	updatePeerIdMsg := types.NewUnsignedMessage(
 		fromAddr,
 		minerAddr,
@@ -439,7 +463,7 @@ func updatePeerIdSuccess(t *testing.T, st state.Tree, vms vm.StorageMap, fromAdd
 func callQueryMethodSuccess(method types.MethodID,
 	ctx context.Context,
 	t *testing.T, st state.Tree,
-	vms vm.StorageMap,
+	vms storagemap.StorageMap,
 	fromAddr address.Address,
 	minerAddr address.Address) [][]byte {
 	res, code, err := consensus.NewDefaultProcessor().CallQueryMethod(ctx, st, vms, minerAddr, method, []byte{}, fromAddr, nil)
@@ -509,7 +533,9 @@ func TestMinerCommitSector(t *testing.T) {
 		provingPeriod := ProvingPeriodDuration(types.OneKiBSectorSize)
 
 		// blockheight was 3
-		require.Equal(t, types.NewBlockHeight(3+provingPeriod), types.NewBlockHeightFromBytes(res.Receipt.Return[1]))
+		window, err := abi.Deserialize(res.Receipt.Return[0], abi.UintArray)
+		require.NoError(t, err)
+		require.Equal(t, types.NewBlockHeight(3+provingPeriod), types.NewBlockHeight(uint64(window.Val.([]types.Uint64)[1])))
 
 		// fail because commR already exists
 		res, err = th.CreateAndApplyTestMessage(t, st, vms, minerAddr, 0, 4, CommitSector, nil, uint64(1), commD, commR, commRStar, th.MakeRandomBytes(types.TwoPoRepProofPartitions.ProofLen()))
@@ -524,7 +550,7 @@ func TestMinerCommitSector(t *testing.T) {
 // related to a particular miner actor.
 type minerActorLiason struct {
 	st            state.Tree
-	vms           vm.StorageMap
+	vms           storagemap.StorageMap
 	ancestors     []block.TipSet
 	minerAddr     address.Address
 	t             *testing.T
@@ -602,7 +628,7 @@ func (mal *minerActorLiason) assertPoStStateAtHeight(expected int64, queryHeight
 	assert.Equal(mal.t, big.NewInt(expected), ret.Val)
 }
 
-func newMinerActorLiason(t *testing.T, st state.Tree, vms vm.StorageMap, ancestors []block.TipSet, minerAddr address.Address) *minerActorLiason {
+func newMinerActorLiason(t *testing.T, st state.Tree, vms storagemap.StorageMap, ancestors []block.TipSet, minerAddr address.Address) *minerActorLiason {
 	return &minerActorLiason{
 		t:             t,
 		st:            st,
@@ -621,7 +647,8 @@ func setupMinerActorLiason(t *testing.T) *minerActorLiason {
 	head := builder.AppendManyOn(10, block.UndefTipSet)
 	ancestors := builder.RequireTipSets(head.Key(), 10)
 	origPid := th.RequireRandomPeerID(t)
-	minerAddr := th.CreateTestMiner(t, st, vms, address.TestAddress, origPid)
+	outAddr := th.CreateTestMiner(t, st, vms, address.TestAddress, origPid)
+	minerAddr := th.RequireActorIDAddress(ctx, t, st, vms, outAddr)
 	return newMinerActorLiason(t, st, vms, ancestors, minerAddr)
 }
 
@@ -765,7 +792,7 @@ func TestMinerSubmitPoStVerification(t *testing.T) {
 		verifier := &verification.FakeVerifier{
 			VerifyPoStValid: true,
 		}
-		vmctx := th.NewFakeVMContextWithVerifier(message, minerState, verifier)
+		vmctx := vm.NewFakeVMContextWithVerifier(message, minerState, verifier)
 		vmctx.BlockHeightValue = types.NewBlockHeight(530)
 
 		miner := Impl(Actor{Bootstrap: false})
@@ -799,7 +826,7 @@ func TestMinerSubmitPoStVerification(t *testing.T) {
 		minerState.SectorCommitments = NewSectorSet()
 
 		minerState.ProvingSet = types.NewIntSet(4)
-		vmctx := th.NewFakeVMContext(message, minerState)
+		vmctx := vm.NewFakeVMContext(message, minerState)
 		vmctx.BlockHeightValue = types.NewBlockHeight(530)
 
 		miner := Impl(Actor{Bootstrap: false})
@@ -823,7 +850,7 @@ func TestMinerSubmitPoStVerification(t *testing.T) {
 			VerifyPoStError: errors.New("verifier error"),
 		}
 
-		vmctx := th.NewFakeVMContextWithVerifier(message, minerState, verifier)
+		vmctx := vm.NewFakeVMContextWithVerifier(message, minerState, verifier)
 		vmctx.BlockHeightValue = types.NewBlockHeight(530)
 
 		miner := Impl(Actor{Bootstrap: false})
@@ -847,7 +874,7 @@ func TestMinerSubmitPoStVerification(t *testing.T) {
 			VerifyPoStValid: false,
 		}
 
-		vmctx := th.NewFakeVMContextWithVerifier(message, minerState, verifier)
+		vmctx := vm.NewFakeVMContextWithVerifier(message, minerState, verifier)
 		vmctx.BlockHeightValue = types.NewBlockHeight(530)
 
 		miner := Impl(Actor{Bootstrap: false})
@@ -1033,7 +1060,8 @@ func TestMinerSubmitPoSt(t *testing.T) {
 	head := builder.AppendManyOn(10, block.UndefTipSet)
 	ancestors := builder.RequireTipSets(head.Key(), 10)
 	origPid := th.RequireRandomPeerID(t)
-	minerAddr := th.CreateTestMiner(t, st, vms, address.TestAddress, origPid)
+	outAddr := th.CreateTestMiner(t, st, vms, address.TestAddress, origPid)
+	minerAddr := th.RequireActorIDAddress(ctx, t, st, vms, outAddr)
 	proof := th.MakeRandomPoStProofForTest()
 	doneDefault := types.EmptyIntSet()
 	faultsDefault := types.EmptyFaultSet()
@@ -1071,7 +1099,12 @@ func TestMinerSubmitPoSt(t *testing.T) {
 		res, err = th.CreateAndApplyTestMessage(t, st, vms, minerAddr, 0, firstCommitBlockHeight+6, GetProvingWindow, ancestors)
 		assert.NoError(t, err)
 		assert.NoError(t, res.ExecutionError)
-		assert.Equal(t, types.NewBlockHeightFromBytes(res.Receipt.Return[1]), types.NewBlockHeight(secondProvingPeriodEnd))
+
+		window, err := abi.Deserialize(res.Receipt.Return[0], abi.UintArray)
+		require.NoError(t, err)
+		end := window.Val.([]types.Uint64)[1]
+
+		assert.Equal(t, uint64(end), secondProvingPeriodEnd)
 	})
 
 	t.Run("after proving period grace period PoSt is rejected", func(t *testing.T) {
@@ -1116,7 +1149,7 @@ func TestMinerSubmitPoSt(t *testing.T) {
 		minerState := *NewState(address.TestAddress, address.TestAddress, peer.ID(""), types.OneKiBSectorSize)
 		minerState.ProvingPeriodEnd = types.NewBlockHeight(secondProvingPeriodEnd)
 
-		vmctx := th.NewFakeVMContext(message, minerState)
+		vmctx := vm.NewFakeVMContext(message, minerState)
 		vmctx.VerifierValue = &verification.FakeVerifier{VerifyPoStValid: true}
 
 		vmctx.Sampler = func(sampleHeight *types.BlockHeight) ([]byte, error) {
@@ -1145,7 +1178,7 @@ func TestMinerSubmitPoSt(t *testing.T) {
 		minerState := *NewState(address.TestAddress, address.TestAddress, peer.ID(""), types.OneKiBSectorSize)
 		minerState.ProvingPeriodEnd = types.NewBlockHeight(secondProvingPeriodEnd)
 
-		vmctx := th.NewFakeVMContext(message, minerState)
+		vmctx := vm.NewFakeVMContext(message, minerState)
 		vmctx.VerifierValue = &verification.FakeVerifier{VerifyPoStValid: true}
 
 		vmctx.Sampler = func(sampleHeight *types.BlockHeight) ([]byte, error) {
@@ -1172,7 +1205,7 @@ func TestMinerSubmitPoSt(t *testing.T) {
 		minerState := *NewState(address.TestAddress, address.TestAddress, peer.ID(""), types.OneKiBSectorSize)
 		minerState.ProvingPeriodEnd = types.NewBlockHeight(secondProvingPeriodEnd)
 
-		vmctx := th.NewFakeVMContext(message, minerState)
+		vmctx := vm.NewFakeVMContext(message, minerState)
 		vmctx.VerifierValue = &verification.FakeVerifier{VerifyPoStValid: true}
 
 		vmctx.Sampler = func(sampleHeight *types.BlockHeight) ([]byte, error) {
@@ -1226,7 +1259,7 @@ func TestAddFaults(t *testing.T) {
 		minerState.CurrentFaultSet = types.NewIntSet(tc.initialCurrent...)
 		minerState.NextFaultSet = types.NewIntSet(tc.initialNext...)
 
-		vmctx := th.NewFakeVMContext(message, minerState)
+		vmctx := vm.NewFakeVMContext(message, minerState)
 		vmctx.BlockHeightValue = types.NewBlockHeight(tc.bh)
 
 		miner := Impl(Actor{})
@@ -1256,7 +1289,7 @@ func TestActorSlashStorageFault(t *testing.T) {
 
 	// CreateTestMiner creates a new test miner with the given peerID and miner
 	// owner address and a given number of committed sectors
-	createMinerWithPower := func(t *testing.T) (state.Tree, vm.StorageMap, address.Address) {
+	createMinerWithPower := func(t *testing.T) (state.Tree, storagemap.StorageMap, address.Address) {
 		ctx := context.Background()
 		st, vms := th.RequireCreateStorages(ctx, t)
 		minerAddr := th.CreateTestMiner(t, st, vms, address.TestAddress, th.RequireRandomPeerID(t))
@@ -1288,7 +1321,8 @@ func TestActorSlashStorageFault(t *testing.T) {
 	}
 
 	t.Run("slashing charges gas", func(t *testing.T) {
-		st, vms, minerAddr := createMinerWithPower(t)
+		st, vms, outAddr := createMinerWithPower(t)
+		minerAddr := th.RequireActorIDAddress(context.TODO(), t, st, vms, outAddr)
 		mockSigner, _ := types.NewMockSignersAndKeyInfo(1)
 
 		// change worker
@@ -1301,7 +1335,7 @@ func TestActorSlashStorageFault(t *testing.T) {
 
 		require.Error(t, result.ExecutionError)
 		assert.Contains(t, result.ExecutionError.Error(), "Insufficient gas")
-		assert.Equal(t, uint8(vminternal.ErrInsufficientGas), result.Receipt.ExitCode)
+		assert.Equal(t, uint8(internal.ErrInsufficientGas), result.Receipt.ExitCode)
 	})
 
 	t.Run("slashing a miner with no storage fails", func(t *testing.T) {
@@ -1316,7 +1350,8 @@ func TestActorSlashStorageFault(t *testing.T) {
 	})
 
 	t.Run("slashing too early fails", func(t *testing.T) {
-		st, vms, minerAddr := createMinerWithPower(t)
+		st, vms, outAddr := createMinerWithPower(t)
+		minerAddr := th.RequireActorIDAddress(context.TODO(), t, st, vms, outAddr)
 
 		res, err := th.CreateAndApplyTestMessage(t, st, vms, minerAddr, 0, lastPossibleSubmission, SlashStorageFault, nil)
 		require.NoError(t, err)
@@ -1328,7 +1363,8 @@ func TestActorSlashStorageFault(t *testing.T) {
 	})
 
 	t.Run("slashing after generation attack time succeeds", func(t *testing.T) {
-		st, vms, minerAddr := createMinerWithPower(t)
+		st, vms, outAddr := createMinerWithPower(t)
+		minerAddr := th.RequireActorIDAddress(context.TODO(), t, st, vms, outAddr)
 
 		// get storage power prior to fault
 		oldTotalStoragePower := th.GetTotalPower(t, st, vms)
@@ -1370,7 +1406,7 @@ func TestActorSlashStorageFault(t *testing.T) {
 	})
 }
 
-func assertSlashStatus(t *testing.T, st state.Tree, vms vm.StorageMap, minerAddr address.Address, power uint64,
+func assertSlashStatus(t *testing.T, st state.Tree, vms storagemap.StorageMap, minerAddr address.Address, power uint64,
 	slashedAt *types.BlockHeight, slashed types.IntSet) {
 	minerState := mustGetMinerState(st, vms, minerAddr)
 
@@ -1423,7 +1459,7 @@ func TestVerifyPIP(t *testing.T) {
 		minerState := *NewState(address.TestAddress, address.TestAddress, peer.ID(""), types.OneKiBSectorSize)
 		minerState.SectorCommitments = commitments
 
-		vmctx := th.NewFakeVMContext(message, minerState)
+		vmctx := vm.NewFakeVMContext(message, minerState)
 		miner := Impl(Actor{})
 
 		code, err := miner.VerifyPieceInclusion(vmctx, commP, pieceSize, firstSectorID, pip)
@@ -1452,7 +1488,7 @@ func TestVerifyPIP(t *testing.T) {
 			VerifyPieceInclusionProofValid: true,
 		}
 
-		vmctx := th.NewFakeVMContextWithVerifier(message, minerState, verifier)
+		vmctx := vm.NewFakeVMContextWithVerifier(message, minerState, verifier)
 		vmctx.BlockHeightValue = minerState.ProvingPeriodEnd.Add(LatePoStGracePeriod(minerState.SectorSize)).Add(types.NewBlockHeight(1))
 		miner := Impl(Actor{})
 
@@ -1534,15 +1570,15 @@ func TestGetProofsMode(t *testing.T) {
 	ctx := context.Background()
 	st, vms := th.RequireCreateStorages(ctx, t)
 
-	gasTracker := vm.NewGasTracker()
+	gasTracker := gastracker.NewGasTracker()
 	gasTracker.MsgGasLimit = 99999
 
 	t.Run("in TestMode", func(t *testing.T) {
-		vmCtx := vm.NewVMContext(vm.NewContextParams{
+		vmCtx := vmcontext.NewVMContext(vmcontext.NewContextParams{
 			From:        &actor.Actor{},
 			To:          &actor.Actor{},
 			Message:     &types.UnsignedMessage{},
-			State:       state.NewCachedStateTree(st),
+			State:       state.NewCachedTree(st),
 			StorageMap:  vms,
 			GasTracker:  gasTracker,
 			BlockHeight: types.NewBlockHeight(0),
@@ -1558,11 +1594,11 @@ func TestGetProofsMode(t *testing.T) {
 	})
 
 	t.Run("in LiveMode", func(t *testing.T) {
-		vmCtx := vm.NewVMContext(vm.NewContextParams{
+		vmCtx := vmcontext.NewVMContext(vmcontext.NewContextParams{
 			From:        &actor.Actor{},
 			To:          &actor.Actor{},
 			Message:     &types.UnsignedMessage{},
-			State:       state.NewCachedStateTree(st),
+			State:       state.NewCachedTree(st),
 			StorageMap:  vms,
 			GasTracker:  gasTracker,
 			BlockHeight: types.NewBlockHeight(0),
@@ -1642,7 +1678,7 @@ func TestGetProvingSetCommitments(t *testing.T) {
 		// The 3 sector is not in the proving set, so its CommR should not appear in the VerifyPoSt request
 		minerState.ProvingSet = types.NewIntSet(1, 2)
 
-		vmctx := th.NewFakeVMContext(message, minerState)
+		vmctx := vm.NewFakeVMContext(message, minerState)
 		miner := Impl(Actor{})
 
 		commitments, code, err := miner.GetProvingSetCommitments(vmctx)
@@ -1660,7 +1696,7 @@ func TestGetProvingSetCommitments(t *testing.T) {
 
 		minerState.ProvingSet = types.NewIntSet(4) // sector commitments has no sector 4
 
-		vmctx := th.NewFakeVMContext(message, minerState)
+		vmctx := vm.NewFakeVMContext(message, minerState)
 		miner := Impl(Actor{})
 
 		_, code, err := miner.GetProvingSetCommitments(vmctx)
@@ -1682,7 +1718,7 @@ func mustDeserializeAddress(t *testing.T, result [][]byte) address.Address {
 }
 
 // mustGetMinerState returns the block of actor state represented by the head of the actor with the given address
-func mustGetMinerState(st state.Tree, vms vm.StorageMap, a address.Address) *State {
+func mustGetMinerState(st state.Tree, vms storagemap.StorageMap, a address.Address) *State {
 	actor := state.MustGetActor(st, a)
 
 	storage := vms.NewStorage(a, actor)
@@ -1708,7 +1744,7 @@ type minerEnvBuilder struct {
 	verifier         *verification.FakeVerifier
 }
 
-func (b *minerEnvBuilder) build() (vm2.Runtime, *verification.FakeVerifier, *Impl) {
+func (b *minerEnvBuilder) build() (*vm.FakeVMContext, *verification.FakeVerifier, *Impl) {
 	minerState := NewState(address.TestAddress, address.TestAddress, peer.ID(""), b.sectorSize)
 	minerState.SectorCommitments = b.sectorSet
 	minerState.ProvingPeriodEnd = b.provingPeriodEnd
@@ -1725,7 +1761,7 @@ func (b *minerEnvBuilder) build() (vm2.Runtime, *verification.FakeVerifier, *Imp
 		b.verifier = &verification.FakeVerifier{}
 	}
 
-	vmctx := th.NewFakeVMContextWithVerifier(types.NewUnsignedMessage(address.TestAddress, address.TestAddress2, 0, types.ZeroAttoFIL, b.message, nil), minerState, b.verifier)
+	vmctx := vm.NewFakeVMContextWithVerifier(types.NewUnsignedMessage(address.TestAddress, address.TestAddress2, 0, types.ZeroAttoFIL, b.message, nil), minerState, b.verifier)
 
 	actor := Impl(Actor{})
 	return vmctx, b.verifier, &actor

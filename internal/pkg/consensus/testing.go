@@ -7,9 +7,10 @@ import (
 	"testing"
 
 	"github.com/filecoin-project/go-filecoin/internal/pkg/block"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/abi"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/miner"
-	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/storagemarket"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor/builtin/power"
 	"github.com/stretchr/testify/require"
 
 	"github.com/filecoin-project/go-filecoin/internal/pkg/types"
@@ -62,14 +63,20 @@ type FakePowerTableViewSnapshot struct {
 func (tq *FakePowerTableViewSnapshot) Query(ctx context.Context, optFrom, to address.Address, method types.MethodID, params ...interface{}) ([][]byte, error) {
 	// Note: this currently happens to work as is, but it's wrong
 	// Note: a better mock is recommended to make sure the correct methods get dispatched
-	if method == storagemarket.GetTotalStorage {
+	if method == power.GetTotalPower {
 		if tq.TotalPower != nil {
 			return [][]byte{tq.TotalPower.Bytes()}, nil
 		}
 		return [][]byte{}, errors.New("something went wrong with the total power")
-	} else if method == miner.GetPower {
+	} else if method == power.GetPowerReport {
 		if tq.MinerPower != nil {
-			return [][]byte{tq.MinerPower.Bytes()}, nil
+			powerReport := types.NewPowerReport(tq.MinerPower.Uint64(), 0)
+			val := abi.Value{
+				Val:  powerReport,
+				Type: abi.PowerReport,
+			}
+			raw, err := val.Serialize()
+			return [][]byte{raw}, err
 		}
 		return [][]byte{}, errors.New("something went wrong with the miner power")
 	} else if method == miner.GetWorker {
@@ -267,4 +274,50 @@ func SeedLoserInNRounds(t *testing.T, n int, ki *types.KeyInfo, minerPower, tota
 		curr, err = tm.NextTicket(curr, wAddr, signer)
 		require.NoError(t, err)
 	}
+}
+
+// MockTicketMachine allows a test to set a function to be called upon ticket
+// generation and validation
+type MockTicketMachine struct {
+	fn func(block.Ticket)
+}
+
+// NewMockTicketMachine creates a mock given a callback
+func NewMockTicketMachine(f func(block.Ticket)) *MockTicketMachine {
+	return &MockTicketMachine{fn: f}
+}
+
+// NextTicket calls the registered callback and returns a fake ticket
+func (mtm *MockTicketMachine) NextTicket(ticket block.Ticket, genAddr address.Address, signer types.Signer) (block.Ticket, error) {
+	mtm.fn(ticket)
+	return MakeFakeTicketForTest(), nil
+}
+
+// IsValidTicket calls the registered callback and returns true
+func (mtm *MockTicketMachine) IsValidTicket(parent, ticket block.Ticket, signerAddr address.Address) bool {
+	mtm.fn(ticket)
+	return true
+}
+
+// MockElectionMachine allows a test to set a function to be called upon
+// election running and validation
+type MockElectionMachine struct {
+	fn func(block.Ticket)
+}
+
+// NewMockElectionMachine creates a mock given a callback
+func NewMockElectionMachine(f func(block.Ticket)) *MockElectionMachine {
+	return &MockElectionMachine{fn: f}
+}
+
+// RunElection calls the registered callback and returns a fake proof
+func (mem *MockElectionMachine) RunElection(ticket block.Ticket, candidateAddr address.Address, signer types.Signer, nullCount uint64) (block.VRFPi, error) {
+	mem.fn(ticket)
+	return MakeFakeElectionProofForTest(), nil
+}
+
+// IsElectionWinner calls the registered callback and returns true
+func (mem *MockElectionMachine) IsElectionWinner(ctx context.Context, ptv PowerTableView, ticket block.Ticket, nullCount uint64, electionProof block.VRFPi, signerAddr, minerAddr address.Address) (bool, error) {
+	mem.fn(ticket)
+	return true, nil
 }

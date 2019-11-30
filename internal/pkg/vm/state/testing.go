@@ -7,7 +7,7 @@ import (
 
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/actor"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/address"
-	"github.com/filecoin-project/go-filecoin/internal/pkg/vm2/vminternal/dispatch"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/internal/dispatch"
 
 	"github.com/ipfs/go-cid"
 	"github.com/ipfs/go-hamt-ipld"
@@ -104,8 +104,8 @@ func (m *MockStateTree) ForEachActor(ctx context.Context, walkFn ActorWalkFn) er
 	panic("Do not call me")
 }
 
-// Debug implements StateTree.Debug
-func (m *MockStateTree) Debug() {
+// GetAllActors implements StateTree.GetAllActors
+func (m *MockStateTree) GetAllActors(ctx context.Context) <-chan GetAllActorsResult {
 	panic("do not call me")
 }
 
@@ -124,8 +124,8 @@ func (m *MockStateTree) GetActorCode(c cid.Cid, protocol uint64) (dispatch.Execu
 // making a test implementation of the cbor store that can map test cids to test
 // states.
 func TreeFromString(t *testing.T, s string, cst *hamt.CborIpldStore) Tree {
-	tree := NewEmptyStateTree(cst)
-	strAddr, err := address.NewActorAddress([]byte(s))
+	tree := NewTree(cst)
+	strAddr, err := address.NewSecp256k1Address([]byte(s))
 	require.NoError(t, err)
 	err = tree.SetActor(context.Background(), strAddr, &actor.Actor{})
 	require.NoError(t, err)

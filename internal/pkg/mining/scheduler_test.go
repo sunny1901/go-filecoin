@@ -68,7 +68,7 @@ func TestMineOnce10Null(t *testing.T) {
 		return st, nil
 	}
 	getAncestors := func(ctx context.Context, ts block.TipSet, newBlockHeight *types.BlockHeight) ([]block.TipSet, error) {
-		return nil, nil
+		return []block.TipSet{baseTs}, nil
 	}
 	messages := chain.NewMessageStore(bs)
 
@@ -81,11 +81,12 @@ func TestMineOnce10Null(t *testing.T) {
 		MinerOwnerAddr: addr,
 		WorkerSigner:   mockSigner,
 
-		GetStateTree: getStateTree,
-		GetWeight:    getWeightTest,
-		GetAncestors: getAncestors,
-		Election:     &consensus.ElectionMachine{},
-		TicketGen:    &consensus.TicketMachine{},
+		TipSetMetadata: fakeTSMetadata{},
+		GetStateTree:   getStateTree,
+		GetWeight:      getWeightTest,
+		GetAncestors:   getAncestors,
+		Election:       &consensus.ElectionMachine{},
+		TicketGen:      &consensus.TicketMachine{},
 
 		MessageSource: pool,
 		Processor:     th.NewFakeProcessor(),

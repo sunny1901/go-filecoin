@@ -2,19 +2,15 @@ package submodule
 
 import (
 	"context"
+	"time"
 
-	"github.com/filecoin-project/go-filecoin/internal/pkg/block"
-	"github.com/filecoin-project/go-filecoin/internal/pkg/config"
 	"github.com/ipfs/go-bitswap"
-	ds "github.com/ipfs/go-datastore"
-
 	bsnet "github.com/ipfs/go-bitswap/network"
-	bserv "github.com/ipfs/go-blockservice"
 	"github.com/ipfs/go-cid"
+	ds "github.com/ipfs/go-datastore"
 	"github.com/ipfs/go-hamt-ipld"
 	bstore "github.com/ipfs/go-ipfs-blockstore"
 	exchange "github.com/ipfs/go-ipfs-exchange-interface"
-	offline "github.com/ipfs/go-ipfs-exchange-offline"
 	offroute "github.com/ipfs/go-ipfs-routing/offline"
 	cbornode "github.com/ipfs/go-ipld-cbor"
 	"github.com/libp2p/go-libp2p"
@@ -31,8 +27,10 @@ import (
 	ma "github.com/multiformats/go-multiaddr"
 	"github.com/pkg/errors"
 
+	"github.com/filecoin-project/go-filecoin/internal/pkg/block"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/config"
+	"github.com/filecoin-project/go-filecoin/internal/pkg/discovery"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/net"
-	"github.com/filecoin-project/go-filecoin/internal/pkg/net/pubsub"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/address"
 	"github.com/filecoin-project/go-filecoin/internal/pkg/vm/state"
 )
@@ -46,7 +44,7 @@ type NetworkSubmodule struct {
 	// Router is a router from IPFS
 	Router routing.Routing
 
-	fsub *libp2pps.PubSub
+	pubsub *libp2pps.PubSub
 
 	// TODO: split chain bitswap from storage bitswap (issue: ???)
 	Bitswap exchange.Interface
@@ -112,9 +110,13 @@ func NewNetworkSubmodule(ctx context.Context, config networkConfig, repo network
 	}
 
 	// Set up libp2p network
+	// The gossipsub heartbeat timeout needs to be set sufficiently low
+	// to enable publishing on first connection.  The default of one
+	// second is not acceptable for tests.
+	libp2pps.GossipSubHeartbeatInterval = 100 * time.Millisecond
 	// TODO: PubSub requires strict message signing, disabled for now
 	// reference issue: #3124
-	fsub, err := libp2pps.NewFloodSub(ctx, peerHost, libp2pps.WithMessageSigning(false))
+	gsub, err := libp2pps.NewGossipSub(ctx, peerHost, libp2pps.WithMessageSigning(false), libp2pps.WithDiscovery(&discovery.NoopDiscovery{}))
 	if err != nil {
 		return NetworkSubmodule{}, errors.Wrap(err, "failed to set up network")
 	}
@@ -128,21 +130,21 @@ func NewNetworkSubmodule(ctx context.Context, config networkConfig, repo network
 	pingService := ping.NewPingService(peerHost)
 
 	// build network
-	network := net.New(peerHost, pubsub.NewPublisher(fsub), pubsub.NewSubscriber(fsub), net.NewRouter(router), bandwidthTracker, net.NewPinger(peerHost, pingService))
+	network := net.New(peerHost, net.NewRouter(router), bandwidthTracker, net.NewPinger(peerHost, pingService))
 
 	// build the network submdule
 	return NetworkSubmodule{
 		NetworkName: networkName,
 		Host:        peerHost,
 		Router:      router,
-		fsub:        fsub,
+		pubsub:      gsub,
 		Bitswap:     bswap,
 		Network:     network,
 	}, nil
 }
 
 func retrieveNetworkName(ctx context.Context, genCid cid.Cid, bs bstore.Blockstore) (string, error) {
-	cborStore := &hamt.CborIpldStore{Blocks: bserv.New(bs, offline.Exchange(bs))}
+	cborStore := hamt.CSTFromBstore(bs)
 	var genesis block.Block
 
 	err := cborStore.Get(ctx, genCid, &genesis)
@@ -150,7 +152,7 @@ func retrieveNetworkName(ctx context.Context, genCid cid.Cid, bs bstore.Blocksto
 		return "", errors.Wrapf(err, "failed to get block %s", genCid.String())
 	}
 
-	tree, err := state.LoadStateTree(ctx, cborStore, genesis.StateRoot)
+	tree, err := state.NewTreeLoader().LoadStateTree(ctx, cborStore, genesis.StateRoot)
 	if err != nil {
 		return "", errors.Wrapf(err, "failed to load node for %s", genesis.StateRoot)
 	}
